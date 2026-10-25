@@ -1,0 +1,45 @@
+rules_version = '2';
+
+// Règles de sécurité de la Salle d'analyse. À coller dans la console Firebase :
+// Firestore Database > Règles > Publier.
+//
+// Le principe : le code du groupe sert de mot de passe. Sans le code exact, on ne peut ni
+// lire ni écrire, et rien ne permet de lister les groupes existants. Avec le code, on peut
+// lire, ajouter des joueurs et enregistrer des bilans. Un bilan ne peut jamais être supprimé.
+// Les tailles sont bornées pour qu'on ne puisse pas remplir la base avec n'importe quoi.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function codeOk(code) {
+      return code.matches('^[A-Z2-9]{5}-[A-Z2-9]{5}$');
+    }
+    function str(v, n) {
+      return v is string && v.size() <= n;
+    }
+
+    match /groupes/{code}/joueurs/{id} {
+      allow read, delete: if codeOk(code);
+      allow create, update: if codeOk(code)
+        && request.resource.data.keys().hasOnly(['name', 'chesscom', 'lichess'])
+        && str(request.resource.data.name, 40) && request.resource.data.name.size() > 0
+        && str(request.resource.data.get('chesscom', ''), 40)
+        && str(request.resource.data.get('lichess', ''), 40);
+    }
+
+    match /groupes/{code}/bilans/{id} {
+      allow read: if codeOk(code);
+      allow create, update: if codeOk(code) && id.size() <= 60
+        && request.resource.data.keys().hasOnly(['pgn', 'white', 'black', 'result', 'date', 'end',
+             'tc', 'timeClass', 'site', 'link', 'wElo', 'bElo', 'plies', 'first', 'siteAcc',
+             'addedAt', 'analysis'])
+        && str(request.resource.data.pgn, 20000)
+        && request.resource.data.analysis is map
+        && request.resource.data.analysis.pos is list
+        && request.resource.data.analysis.pos.size() <= 1000
+        && request.resource.data.analysis.ply is list
+        && request.resource.data.analysis.ply.size() <= 1000;
+      allow delete: if false;
+    }
+  }
+}

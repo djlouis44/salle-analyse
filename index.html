@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Salle d'analyse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <div class="mark" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <div>
+        <h1>Salle d'analyse</h1>
+        <div class="status" id="status"><span class="dot"></span><span>Chargement…</span></div>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs" aria-label="Sections">
+      <button class="tab" data-view="groupe">Groupe</button>
+      <button class="tab" data-view="parties">Parties</button>
+      <button class="tab" data-view="analyse">Bilan</button>
+      <button class="tab" data-view="joueurs">Joueurs</button>
+    </nav>
+  </header>
+  <main id="main"></main>
+  <footer class="foot">Moteur : <a href="https://github.com/nmrugg/stockfish.js" target="_blank" rel="noopener">Stockfish 18</a> (licence GPL v3), échecs : <a href="https://github.com/jhlywa/chess.js" target="_blank" rel="noopener">chess.js</a> (BSD). <a href="https://github.com/djlouis44/salle-analyse" target="_blank" rel="noopener">Code source</a> sous GPL v3.</footer>
+</div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
