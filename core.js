@@ -127,6 +127,53 @@ export function buildAnalysis(hist, pos, depth) {
   };
 }
 
+// Elo estimé à partir de la précision. Tables calées le 2026-10-25 sur 2 908 parties rapides
+// chess.com (précision chess.com et Elo des deux joueurs, 300 joueurs de 100 à 2 500 Elo).
+// Méthode : précision typique de chaque niveau, puis lecture inverse (« tu as joué comme un
+// joueur de X »), ce qui évite de ramener tout le monde vers la moyenne.
+// Erreurs mesurées par validation croisée :
+//   - sur une seule partie : ~530 en moyenne, pas mieux qu'un chiffre fixe, d'où « indicatif » ;
+//   - sur la moyenne de 8 à 20 parties d'un joueur : ~220 (contre ~570 pour un chiffre fixe).
+// Nos précisions (formule de type Lichess) sont plus généreuses que celles de chess.com : on les
+// convertit d'abord en « précision chess.com », par une droite mesurée sur des parties chess.com
+// analysées par nous (voir CC_MAP), puis on lit les tables.
+const ELO_GAME = [[54.2, 150], [60.1, 255], [62.4, 350], [65.5, 460], [67.4, 590], [68.7, 735], [69.8, 845],
+  [72.1, 1005], [75.1, 1290], [80.5, 1710], [83.2, 2230], [91.3, 2520]];
+const ELO_AVG = [[56.9, 225], [62.7, 385], [66.8, 555], [69.0, 790], [71.0, 995], [73.3, 1225], [80.6, 1950], [83.6, 2320]];
+export const ELO_MIN_MOVES = 10;  // en dessous, une partie ne dit rien
+export const ELO_MIN_GAMES = 8;   // bilans nécessaires pour l'Elo d'un joueur
+export const ELO_LAST_GAMES = 20; // on garde les plus récents
+export const ELO_GAME_ERR = 500;
+export const ELO_AVG_ERR = 220;
+
+function readElo(table, acc) {
+  if (acc == null) return null;
+  if (acc <= table[0][0]) return { v: table[0][1], edge: '<' };
+  const last = table[table.length - 1];
+  if (acc >= last[0]) return { v: last[1], edge: '>' };
+  for (let i = 0; i < table.length - 1; i++) {
+    const [a0, e0] = table[i]; const [a1, e1] = table[i + 1];
+    if (acc <= a1) return { v: Math.round((e0 + ((acc - a0) / (a1 - a0)) * (e1 - e0)) / 50) * 50, edge: '' };
+  }
+  return null;
+}
+// Précision chess.com ≈ -38,36 + 1,305 × notre précision. Mesuré le 2026-10-25 sur 30 parties
+// rapides chess.com de 180 à 2 330 Elo (60 précisions), bilans en profondeur 12 : nos
+// précisions dépassent les leurs de 12,6 points en moyenne, erreur de la droite ~5 points.
+// Vérifié en profondeur 15 sur 10 de ces parties : précisions quasi identiques (+0,9) et même
+// droite valable (erreur 4,6). Une seule droite suffit donc pour 12 à 17.
+const CC_A = -38.36, CC_B = 1.305;
+export const toChessComAcc = (acc) => (acc == null ? null : Math.max(0, Math.min(100, CC_A + CC_B * acc)));
+export const estimateGameElo = (acc) => readElo(ELO_GAME, toChessComAcc(acc));
+// accs : précisions des bilans du joueur, de la plus récente à la plus ancienne.
+export function estimatePlayerElo(accs) {
+  const last = accs.slice(0, ELO_LAST_GAMES);
+  if (last.length < ELO_MIN_GAMES) return null;
+  const e = readElo(ELO_AVG, last.reduce((s, a) => s + toChessComAcc(a), 0) / last.length);
+  return e && { ...e, n: last.length };
+}
+export const eloText = (e) => (e.edge === '<' ? 'moins de ' : e.edge === '>' ? 'plus de ' : '≈ ') + e.v;
+
 // Analyse une ligne "info" UCI. Renvoie null si la ligne ne sert pas.
 export function parseInfo(l) {
   if (!l.startsWith('info ') || l.indexOf(' pv ') < 0 || l.indexOf(' score ') < 0) return null;

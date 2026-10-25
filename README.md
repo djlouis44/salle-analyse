@@ -9,8 +9,16 @@ partagés.
   précision par coup et par partie, classement des coups (brillant, grand coup, meilleur,
   excellent, bon, imprécision, erreur, gaffe), courbe d'évaluation, meilleur coup.
 - Un bilan calculé une fois est enregistré dans Firestore et visible par tout le groupe.
-- Page Groupe : classement par précision moyenne, gaffes par partie, coups brillants,
-  victoires, nulles et défaites sur 7 jours, 30 jours ou depuis le début.
+- Page Groupe : classement par précision moyenne, Elo estimé, gaffes par partie, coups
+  brillants, victoires, nulles et défaites sur 7 jours, 30 jours ou depuis le début.
+- Plusieurs groupes possibles sur un même appareil, avec un menu pour passer de l'un à l'autre.
+
+## Elo estimé
+
+Calé sur des parties rapides chess.com (voir `core.js` et `calibrage/`). Sur la moyenne des
+20 derniers bilans d'un joueur (8 minimum), l'erreur est d'environ 220 points. Sur une seule
+partie, elle dépasse 500 points : cette valeur est affichée comme « indicative ». Les valeurs
+sont sur l'échelle chess.com (les classements Lichess sont plus hauts à niveau égal).
 
 ## Accès
 

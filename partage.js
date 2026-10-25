@@ -1,6 +1,7 @@
-// Partage du groupe dans Firestore. Tout est rangé sous groupes/<code>/ :
-//   joueurs/<id> : { name, chesscom, lichess }
-//   bilans/<id>  : la partie (PGN et infos) + son bilan, pour que tout le groupe le voie
+// Partage des groupes dans Firestore. Chaque groupe est rangé sous groupes/<code> :
+//   groupes/<code>          : { name } (nom affiché du groupe)
+//   joueurs/<id>            : { name, chesscom, lichess }
+//   bilans/<id>             : la partie (PGN et infos) + son bilan, pour que tout le groupe le voie
 // Les parties elles-mêmes ne sont pas stockées : chaque appareil les récupère sur chess.com
 // et Lichess. Ça garde le nombre de lectures loin du quota gratuit.
 import { firebaseConfig } from './firebase-config.js';
@@ -24,16 +25,30 @@ export function cleanCode(s) {
   return CODE_RE.test(code) ? code : null;
 }
 
-// Ouvre le groupe et écoute les changements en direct. Renvoie les fonctions d'écriture.
-export async function openGroup(code, { onPlayers, onBilans, onError }) {
-  const [{ initializeApp }, fs] = await Promise.all([import(SDK + 'firebase-app.js'), import(SDK + 'firebase-firestore.js')]);
-  const app = initializeApp(firebaseConfig);
+// Firebase n'est chargé et initialisé qu'une fois, même si on change de groupe.
+let fs = null, db = null;
+async function init() {
+  if (db) return;
+  const [{ initializeApp }, f] = await Promise.all([import(SDK + 'firebase-app.js'), import(SDK + 'firebase-firestore.js')]);
+  fs = f;
   // Cache local : l'appli s'affiche tout de suite au rechargement, même hors ligne.
-  const db = fs.initializeFirestore(app, { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) });
+  db = fs.initializeFirestore(initializeApp(firebaseConfig), { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) });
+}
+
+// Ouvre un groupe et écoute les changements en direct. Renvoie les fonctions d'écriture,
+// et close() pour arrêter l'écoute quand on passe à un autre groupe.
+export async function openGroup(code, { onInfo, onPlayers, onBilans, onError }) {
+  await init();
   const base = 'groupes/' + code + '/';
-  fs.onSnapshot(fs.collection(db, base + 'joueurs'), (s) => onPlayers(s.docs.map((d) => ({ ...d.data(), id: d.id }))), onError);
-  fs.onSnapshot(fs.collection(db, base + 'bilans'), (s) => onBilans(s.docs.map((d) => ({ ...d.data(), id: d.id }))), onError);
+  const unsubs = [
+    // Le nom est facultatif : une erreur ici (règles pas encore à jour) ne bloque rien.
+    fs.onSnapshot(fs.doc(db, 'groupes', code), (d) => onInfo(d.exists() ? d.data() : {}), () => onInfo({})),
+    fs.onSnapshot(fs.collection(db, base + 'joueurs'), (s) => onPlayers(s.docs.map((d) => ({ ...d.data(), id: d.id }))), onError),
+    fs.onSnapshot(fs.collection(db, base + 'bilans'), (s) => onBilans(s.docs.map((d) => ({ ...d.data(), id: d.id }))), onError),
+  ];
   return {
+    close: () => unsubs.forEach((u) => u()),
+    setName: (name) => fs.setDoc(fs.doc(db, 'groupes', code), { name }),
     putPlayer: ({ id, ...p }) => fs.setDoc(fs.doc(db, base + 'joueurs', id), p),
     delPlayer: (id) => fs.deleteDoc(fs.doc(db, base + 'joueurs', id)),
     putBilan: ({ id, ...b }) => fs.setDoc(fs.doc(db, base + 'bilans', id), b),

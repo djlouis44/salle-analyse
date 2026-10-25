@@ -18,6 +18,15 @@ service cloud.firestore {
       return v is string && v.size() <= n;
     }
 
+    // Le document du groupe ne contient que son nom. « get » seulement : lire un groupe dont
+    // on a le code, jamais lister tous les groupes.
+    match /groupes/{code} {
+      allow get: if codeOk(code);
+      allow create, update: if codeOk(code)
+        && request.resource.data.keys().hasOnly(['name'])
+        && str(request.resource.data.name, 40);
+    }
+
     match /groupes/{code}/joueurs/{id} {
       allow read, delete: if codeOk(code);
       allow create, update: if codeOk(code)

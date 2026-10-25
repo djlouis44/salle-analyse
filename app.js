@@ -1,5 +1,6 @@
 import { Chess } from './chess.js';
-import { CLS, ORDER, summarizePosition, buildAnalysis, parseInfo } from './core.js';
+import { CLS, ORDER, summarizePosition, buildAnalysis, parseInfo, estimateGameElo, estimatePlayerElo, eloText,
+  ELO_MIN_MOVES, ELO_MIN_GAMES, ELO_LAST_GAMES, ELO_GAME_ERR, ELO_AVG_ERR } from './core.js';
 import { playerGames } from './sources.js';
 import { enabled as sharing, openGroup, newCode, cleanCode } from './partage.js';
 
@@ -50,27 +51,69 @@ function rebuild() {
   render();
 }
 
+// Groupes connus sur cet appareil : [{ code, name }]. On peut en avoir plusieurs et passer de
+// l'un à l'autre ; le dernier ouvert est rouvert à la visite suivante.
+const GLIST = 'salle-analyse-groupes';
+function myGroups() {
+  try {
+    const l = JSON.parse(localStorage.getItem(GLIST) || 'null');
+    if (l) return l;
+    const old = cleanCode(localStorage.getItem(GKEY)); // ancienne version : un seul groupe
+    return old ? [{ code: old, name: '' }] : [];
+  } catch (_) { return []; }
+}
+function saveGroups(l) { try { localStorage.setItem(GLIST, JSON.stringify(l)); } catch (_) {} }
+function rememberGroup(code, name) {
+  const l = myGroups(); const g = l.find((x) => x.code === code);
+  if (g) { if (name != null) g.name = name; } else l.push({ code, name: name || '' });
+  saveGroups(l);
+}
+const groupName = (code) => (myGroups().find((x) => x.code === code) || {}).name || code;
+
 async function initStore() {
   if (!sharing) { S.mode = 'local'; loadLocal(); S.players = local.players; bilans = local.bilans; rebuild(); autoSync(); return; }
   let saved = null; try { saved = localStorage.getItem(GKEY); } catch (_) {}
-  const code = cleanCode(new URLSearchParams(location.search).get('g')) || cleanCode(saved);
+  const code = cleanCode(new URLSearchParams(location.search).get('g')) || cleanCode(saved) || (myGroups()[0] || {}).code;
   if (code) joinGroup(code); else { S.mode = 'nogroup'; render(); }
 }
 
-async function joinGroup(code) {
-  S.group = code; S.mode = 'loading'; S.view = 'groupe'; loadLocal(); render();
+function leaveCurrent() {
+  if (remote) remote.close();
+  remote = null; S.players = []; bilans = []; local = { games: [], players: [], bilans: [], lastSync: 0 };
+  S.game = null; S.gfilter = 'all'; S.editPlayer = null; S.confirm = null;
+}
+
+async function joinGroup(code, name) {
+  if (S.job) { S.flash = { t: 'err', m: 'Un bilan est en cours : attends la fin ou arrête-le avant de changer de groupe.' }; render(); return; }
+  leaveCurrent();
+  S.group = code; S.mode = 'loading'; S.view = 'groupe'; loadLocal(); rebuild();
+  rememberGroup(code, name);
   try { localStorage.setItem(GKEY, code); } catch (_) {}
   history.replaceState(null, '', location.pathname + '?g=' + code);
   let first = true;
   try {
-    remote = await openGroup(code, {
-      onPlayers: (ps) => { S.players = ps; S.mode = 'shared'; rebuild(); if (first) { first = false; autoSync(); } },
-      onBilans: (bs) => { bilans = bs; rebuild(); },
+    const r = await openGroup(code, {
+      onInfo: (info) => { if (S.group === code && info.name) { rememberGroup(code, info.name); render(); } },
+      onPlayers: (ps) => { if (S.group !== code) return; S.players = ps; S.mode = 'shared'; rebuild(); if (first) { first = false; autoSync(); } },
+      onBilans: (bs) => { if (S.group !== code) return; bilans = bs; rebuild(); },
       onError: (e) => { S.flash = { t: 'err', m: 'Le partage ne répond pas (' + (e && (e.code || e.message)) + '). Recharge la page.' }; render(); },
     });
+    if (S.group !== code) { r.close(); return; }
+    remote = r;
+    if (name) r.setName(name).catch(() => {}); // nom choisi à la création du groupe
   } catch (e) {
     S.mode = 'nogroup'; S.flash = { t: 'err', m: 'Impossible de joindre Firebase (' + (e && e.message) + '). Vérifie ta connexion.' }; render();
   }
+}
+
+// Retire le groupe de cet appareil seulement : rien n'est effacé pour les autres, et le lien
+// permet d'y revenir.
+function forgetGroup(code) {
+  saveGroups(myGroups().filter((x) => x.code !== code));
+  try { localStorage.removeItem('salle-analyse-v3:' + code); if (localStorage.getItem(GKEY) === code) localStorage.removeItem(GKEY); } catch (_) {}
+  const next = myGroups()[0];
+  if (next) joinGroup(next.code);
+  else { leaveCurrent(); S.group = null; S.mode = 'nogroup'; history.replaceState(null, '', location.pathname); render(); }
 }
 
 function autoSync() { if (S.players.length && Date.now() - local.lastSync > SYNC_EVERY) syncGames(); }
@@ -121,10 +164,12 @@ function toGame(src) {
 // Récupère les parties récentes de chaque joueur et ajoute celles qu'on n'a pas encore.
 async function syncGames(players = S.players) {
   if (S.sync) return;
+  const group = S.group;
   S.sync = { done: 0, total: players.length, errors: [] }; render();
   let added = 0;
   for (const p of players) {
     const { games, errors } = await playerGames({ chesscom: p.chesscom, lichess: p.lichess }, { max: IMPORT_RAPID, maxOther: IMPORT_OTHER, months: IMPORT_MONTHS });
+    if (S.group !== group) { S.sync = null; render(); return; } // on a changé de groupe entre-temps
     errors.forEach((e) => S.sync.errors.push(p.name + ' : ' + e.message));
     const known = new Set(local.games.map((g) => g.id));
     const fresh = games.filter((g) => !known.has(g.id)).map(toGame).filter(Boolean);
@@ -281,6 +326,20 @@ function inPeriod(g) {
 }
 // Les parties collées à la main n'ont pas de cadence connue : on les garde toujours.
 function inCadence(g) { return !S.rapidOnly || !g.timeClass || g.timeClass === 'rapid'; }
+// Elo estimé d'un joueur du groupe : moyenne de précision de ses derniers bilans en rapide
+// (le calibrage a été fait sur des rapides ; en blitz la précision est plus basse).
+function playerElo(p) {
+  const accs = [];
+  for (const g of S.games) {
+    if (!g.analysis || (g.timeClass && g.timeClass !== 'rapid')) continue;
+    for (const side of ['w', 'b']) {
+      const pl = playerFor(side === 'w' ? g.white : g.black, g.site);
+      if (pl && pl.id === p.id && g.analysis.acc[side] != null) accs.push([g.end || Date.parse(g.date) || 0, g.analysis.acc[side]]);
+    }
+  }
+  accs.sort((x, y) => y[0] - x[0]);
+  return estimatePlayerElo(accs.map((x) => x[1]));
+}
 function moverOf(g, i) { const f = g.first || 'w'; return i % 2 === 0 ? f : (f === 'w' ? 'b' : 'w'); }
 function groupStats() {
   const games = S.games.filter((g) => inPeriod(g) && inCadence(g));
@@ -318,10 +377,16 @@ function moveLabel(g, i) {
 function render() {
   document.querySelectorAll('.tab').forEach((t) => t.setAttribute('aria-current', t.dataset.view === S.view ? 'page' : 'false'));
   const st = $('#status');
-  if (S.mode === 'shared') st.innerHTML = `<span class="dot on"></span><span>Groupe <span class="mono">${esc(S.group)}</span> · partagé</span>`;
-  else if (S.mode === 'local') st.innerHTML = '<span class="dot warn"></span><span>Mode local : rien n’est partagé</span>';
-  else if (S.mode === 'nogroup') st.innerHTML = '<span class="dot"></span><span>Pas encore de groupe</span>';
-  else st.innerHTML = '<span class="dot"></span><span>Connexion au groupe…</span>';
+  const groups = myGroups();
+  if (S.mode === 'local') st.innerHTML = '<span class="dot warn"></span><span>Mode local : rien n’est partagé</span>';
+  else if (!groups.length) st.innerHTML = `<span class="dot"></span><span>${S.mode === 'nogroup' ? 'Pas encore de groupe' : 'Connexion au groupe…'}</span>`;
+  else {
+    // Sélecteur de groupe : passer d'un groupe à l'autre, ou en rejoindre / créer un nouveau.
+    const cur = S.mode === 'nogroup' ? '__new' : S.group;
+    const opts = groups.map((g) => `<option value="${esc(g.code)}" ${g.code === cur ? 'selected' : ''}>${esc(g.name || g.code)}</option>`).join('')
+      + `<option value="__new" ${cur === '__new' ? 'selected' : ''}>+ Rejoindre ou créer un groupe</option>`;
+    st.innerHTML = `<span class="dot ${S.mode === 'shared' ? 'on' : ''}"></span><select id="gsel" class="gsel" aria-label="Groupe">${opts}</select>`;
+  }
   $('#tabs').hidden = S.mode === 'nogroup';
   const main = $('#main');
   const flash = S.flash ? `<div class="note ${S.flash.t}" role="status" style="margin-bottom:14px">${esc(S.flash.m)}</div>` : '';
@@ -356,17 +421,21 @@ function cadenceSeg() {
 }
 
 function viewWelcome() {
-  return `<div class="grid2">
+  const groups = myGroups();
+  const mine = groups.length ? `<div class="panel" style="margin-bottom:16px"><div class="eyebrow" style="margin-bottom:6px">Mes groupes</div>
+    ${groups.map((g) => `<button class="hl-item" data-act="opengroup" data-v="${esc(g.code)}"><span><div class="big">${esc(g.name || 'Groupe sans nom')}</div><div class="sub mono">${esc(g.code)}</div></span><span class="right">Ouvrir</span></button>`).join('')}</div>` : '';
+  return `${mine}<div class="grid2">
     <div class="panel stack">
-      <div><div class="eyebrow">Tu as reçu un code</div><h2 class="h2" style="margin-top:4px">Rejoindre le groupe</h2></div>
+      <div><div class="eyebrow">Tu as reçu un code</div><h2 class="h2" style="margin-top:4px">Rejoindre un groupe</h2></div>
       <label class="f">Code du groupe<input type="text" id="gcode" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="K7Q2X-M9PTA"></label>
       <div><button class="btn primary" data-act="joingroup">Rejoindre</button></div>
       <p class="muted small" style="margin:0">Le plus simple : ouvre le lien que tes amis t’ont envoyé, le code est dedans.</p>
     </div>
     <div class="panel stack">
       <div><div class="eyebrow">Premier du groupe</div><h2 class="h2" style="margin-top:4px">Créer un groupe</h2></div>
+      <label class="f">Nom du groupe<input type="text" id="gname" maxlength="40" autocomplete="off" placeholder="Les rapides du jeudi"></label>
       <p class="muted small" style="margin:0">L’appli tire un code au hasard. Tu envoies ensuite le lien à tes amis : toute personne qui a le lien voit et complète les bilans du groupe, sans créer de compte.</p>
-      <div><button class="btn" data-act="newgroup">Créer un groupe</button></div>
+      <div><button class="btn" data-act="newgroup">Créer le groupe</button></div>
     </div>
   </div>`;
 }
@@ -386,12 +455,13 @@ function viewGroup() {
   }
   const s = groupStats();
   const table = s.rows.length ? `<div class="tablewrap"><table class="ranking">
-    <thead><tr><th></th><th>Joueur</th><th class="num">Parties</th><th class="num">Précision moy.</th><th class="num">Gaffes / partie</th><th class="num">Brillants</th><th class="num">V · N · D</th></tr></thead>
+    <thead><tr><th></th><th>Joueur</th><th class="num">Parties</th><th class="num">Précision moy.</th><th class="num" title="Sur les ${ELO_LAST_GAMES} derniers bilans en rapide (${ELO_MIN_GAMES} minimum), à ± ${ELO_AVG_ERR} près">Elo estimé</th><th class="num">Gaffes / partie</th><th class="num">Brillants</th><th class="num">V · N · D</th></tr></thead>
     <tbody>${s.rows.map((r, i) => `<tr>
       <td class="rank">${r.avg != null ? i + 1 : '–'}</td>
       <td class="pl"><div class="who">${esc(r.p.name)}</div><div class="handle">${esc([r.p.chesscom && 'chess.com ' + r.p.chesscom, r.p.lichess && 'lichess ' + r.p.lichess].filter(Boolean).join(' · '))}</div></td>
       <td class="num st-games" data-l="Parties">${r.games}${r.an < r.games ? `<span class="muted"> (${r.an} bilan${r.an > 1 ? 's' : ''})</span>` : ''}</td>
       <td class="num st-acc" data-l="Précision">${r.avg != null ? r.avg.toFixed(1) + ' %<span class="accbar"><i style="width:' + r.avg + '%"></i></span>' : '<span class="muted">—</span>'}</td>
+      <td class="num st-elo" data-l="Elo estimé">${(() => { const e = playerElo(r.p); return e ? eloText(e) : `<span class="muted" title="Il faut ${ELO_MIN_GAMES} bilans en rapide">—</span>`; })()}</td>
       <td class="num st-bl" data-l="Gaffes / partie">${r.an ? (r.blunders / r.an).toFixed(1) : '—'}</td>
       <td class="num st-br" data-l="Brillants">${r.brill}</td>
       <td class="num st-wdl" data-l="V · N · D">${r.w} · ${r.d} · ${r.l}</td></tr>`).join('')}</tbody></table></div>`
@@ -415,7 +485,7 @@ function viewGroup() {
       <div class="panel"><div class="eyebrow" style="margin-bottom:6px">Pires gaffes</div>
         ${s.flops.length ? `<div class="hl-list">${s.flops.map((x) => item(x, 'flop')).join('')}</div>` : '<p class="muted small">Aucune gaffe enregistrée sur cette période. Ça ne durera pas.</p>'}</div>
     </div>
-    <p class="muted small">La précision et les classements imitent la méthode de chess.com (perte de probabilité de gain à chaque coup), mais ne donnent pas exactement les mêmes chiffres.</p>
+    <p class="muted small">La précision et les classements imitent la méthode de chess.com (perte de probabilité de gain à chaque coup), mais ne donnent pas exactement les mêmes chiffres. L’Elo estimé vient de la précision moyenne des ${ELO_LAST_GAMES} derniers bilans en rapide (${ELO_MIN_GAMES} minimum), calée sur 2 900 parties chess.com : compte ± ${ELO_AVG_ERR} points.</p>
   </div>`;
 }
 
@@ -483,10 +553,16 @@ function viewPlayers() {
     </form>
     <div class="stack">
       <div class="panel"><h2 class="h2" style="margin-bottom:4px">Le groupe</h2>${list}</div>
-      ${S.mode === 'shared' ? `<div class="panel stack"><div class="eyebrow">Lien à envoyer au groupe</div>
+      ${S.mode === 'shared' ? `<div class="panel stack"><div class="eyebrow">Nom du groupe</div>
+        <div class="row"><input type="text" id="grename" maxlength="40" value="${esc(groupName(S.group) === S.group ? '' : groupName(S.group))}" placeholder="Donne un nom au groupe" style="flex:1 1 160px"><button class="btn" data-act="rename">Renommer</button></div></div>
+        <div class="panel stack"><div class="eyebrow">Lien à envoyer au groupe</div>
         <input type="text" readonly value="${esc(groupLink())}" aria-label="Lien du groupe" onfocus="this.select()">
         <div><button class="btn" data-act="copylink">Copier le lien</button></div>
-        <p class="muted small" style="margin:0">Garde-le entre vous : toute personne qui a ce lien peut voir et modifier le groupe.</p></div>` : ''}
+        <p class="muted small" style="margin:0">Garde-le entre vous : toute personne qui a ce lien peut voir et modifier le groupe.</p></div>
+        <div class="row">${S.confirm === 'leave'
+          ? `<button class="btn danger" data-act="leave">Confirmer : retirer ce groupe de cet appareil</button><button class="btn ghost" data-act="unconfirm">Annuler</button>`
+          : `<button class="btn ghost" data-act="confirm" data-v="leave">Quitter ce groupe sur cet appareil</button>`}</div>
+        <p class="muted small" style="margin:0">Quitter ne supprime rien pour les autres : le lien permet d’y revenir.</p>` : ''}
     </div></div>`;
 }
 
@@ -577,11 +653,22 @@ function viewAnalysis() {
     // Précision donnée par le site lui-même, quand la partie y a déjà eu son bilan : sert à comparer.
     const siteName = g.site === 'lichess' ? 'Lichess' : 'chess.com';
     const cmp = (s) => (g.siteAcc && g.siteAcc[s] != null ? `<div class="cmp">${siteName} : ${(+g.siteAcc[s]).toFixed(1)}</div>` : '');
+    // Elo estimé : celui du joueur sur ses derniers bilans (fiable), et celui de cette partie
+    // seule (indicatif), si le joueur a joué assez de coups pour que ça veuille dire quelque chose.
+    const elo = (s) => {
+      const x = s === 'w' ? W : B; let h = '';
+      const pe = x.player && playerElo(x.player);
+      if (pe) h += `<div class="elo" title="Moyenne de ses ${pe.n} derniers bilans en rapide, à ± ${ELO_AVG_ERR} près"><span class="mono">${eloText(pe)}</span> Elo estimé</div>`;
+      const moves = a.ply.filter((_, i) => moverOf(g, i) === s).length;
+      const ge = moves >= ELO_MIN_MOVES ? estimateGameElo(a.acc[s]) : null;
+      if (ge) h += `<div class="cmp" title="Sur une seule partie, l’estimation peut se tromper de ${ELO_GAME_ERR} points">Cette partie : ${eloText(ge)} (indicatif)</div>`;
+      return h;
+    };
     side += `<div class="panel stack">
       <div class="row" style="justify-content:space-between"><div class="eyebrow">Bilan · profondeur ${a.depth}${a.sec != null ? ' · ' + a.sec + ' s' : ''}</div>${g.sample ? '<span class="chip">Partie d’essai</span>' : ''}</div>
       <div class="acc-duo">
-        <div class="acc-card"><div class="p">${esc(W.name)}</div><div class="n mono">${a.acc.w ?? '–'}</div><div class="small muted">précision</div>${cmp('w')}</div>
-        <div class="acc-card"><div class="p">${esc(B.name)}</div><div class="n mono">${a.acc.b ?? '–'}</div><div class="small muted">précision</div>${cmp('b')}</div>
+        <div class="acc-card"><div class="p">${esc(W.name)}</div><div class="n mono">${a.acc.w ?? '–'}</div><div class="small muted">précision</div>${elo('w')}${cmp('w')}</div>
+        <div class="acc-card"><div class="p">${esc(B.name)}</div><div class="n mono">${a.acc.b ?? '–'}</div><div class="small muted">précision</div>${elo('b')}${cmp('b')}</div>
       </div>
       ${graphSVG(a, k)}
       <table class="counts"><tbody>${ORDER.map((c) => `<tr><td class="c">${counts[c].w}</td><td><span class="b b-${c}">${CLS[c].sym}</span> ${CLS[c].label}</td><td class="c">${counts[c].b}</td></tr>`).join('')}</tbody></table>
@@ -674,7 +761,15 @@ document.addEventListener('click', async (ev) => {
   else if (act === 'unconfirm') { S.confirm = null; render(); }
   else if (act === 'delgame') { S.confirm = null; removeGame(t.dataset.id); }
   else if (act === 'delp') { S.confirm = null; try { await removePlayer(t.dataset.id); } catch (e) { writeErr(e); } }
-  else if (act === 'newgroup') joinGroup(newCode());
+  else if (act === 'newgroup') { S.flash = null; joinGroup(newCode(), ($('#gname') || {}).value?.trim().slice(0, 40) || ''); }
+  else if (act === 'opengroup') { S.flash = null; joinGroup(v); }
+  else if (act === 'leave') { S.confirm = null; forgetGroup(S.group); }
+  else if (act === 'rename') {
+    const n = ($('#grename') || {}).value?.trim().slice(0, 40) || '';
+    if (!n || !remote) return;
+    try { await remote.setName(n); rememberGroup(S.group, n); S.flash = { t: 'ok', m: 'Groupe renommé : ' + n + '.' }; } catch (e) { writeErr(e); return; }
+    render();
+  }
   else if (act === 'joingroup') { const c = cleanCode(($('#gcode') || {}).value); if (c) { S.flash = null; joinGroup(c); } else { S.flash = { t: 'err', m: 'Code invalide : il ressemble à K7Q2X-M9PTA.' }; render(); } }
   else if (act === 'copylink') copyLink();
   else if (act === 'editp') { S.editPlayer = S.players.find((p) => p.id === t.dataset.id) || null; render(); }
@@ -686,7 +781,15 @@ document.addEventListener('click', async (ev) => {
   else if (act === 'analyze') { if (S.game) analyze(S.game); }
   else if (act === 'cancel') { if (S.job) S.job.cancel = true; }
 });
-document.addEventListener('change', (ev) => { if (ev.target.id === 'gfilter') { S.gfilter = ev.target.value; S.limit = 40; render(); } });
+document.addEventListener('change', (ev) => {
+  if (ev.target.id === 'gfilter') { S.gfilter = ev.target.value; S.limit = 40; render(); }
+  else if (ev.target.id === 'gsel') {
+    const v = ev.target.value;
+    if (v !== '__new') { S.flash = null; joinGroup(v); return; }
+    if (S.job) { S.flash = { t: 'err', m: 'Un bilan est en cours : attends la fin ou arrête-le avant de changer de groupe.' }; render(); return; }
+    leaveCurrent(); S.group = null; S.mode = 'nogroup'; S.flash = null; history.replaceState(null, '', location.pathname); render();
+  }
+});
 document.addEventListener('submit', async (ev) => {
   if (ev.target.id !== 'pform') return; ev.preventDefault();
   const name = $('#pname').value.trim(); if (!name) return;
