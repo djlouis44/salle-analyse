@@ -50,5 +50,16 @@ service cloud.firestore {
         && request.resource.data.analysis.ply.size() <= 1000;
       allow delete: if false;
     }
+
+    // Parties entre deux joueurs du groupe : mêmes infos qu'un bilan, sans le bilan.
+    match /groupes/{code}/duels/{id} {
+      allow read: if codeOk(code);
+      allow create, update: if codeOk(code) && id.size() <= 60
+        && request.resource.data.keys().hasOnly(['pgn', 'white', 'black', 'result', 'date', 'end',
+             'tc', 'timeClass', 'site', 'link', 'wElo', 'bElo', 'plies', 'first', 'siteAcc',
+             'addedAt'])
+        && str(request.resource.data.pgn, 20000);
+      allow delete: if false;
+    }
   }
 }

@@ -21,7 +21,7 @@ const S = {
   view: 'groupe', players: [], games: [], mode: 'loading',
   period: '30', gfilter: 'all', game: null, ply: 0, flip: false,
   depth: MOBILE ? 12 : 15, job: null, flash: null, editPlayer: null, confirm: null, engineErr: null,
-  rapidOnly: true, sync: null, limit: 40, group: null,
+  rapidOnly: true, sync: null, limit: 40, group: null, between: false, duel: null,
 };
 
 /* ---------- Stockage ---------- */
@@ -33,6 +33,7 @@ const GKEY = 'salle-analyse-groupe';
 const SYNC_EVERY = 15 * 60000; // récupération automatique au plus toutes les 15 min
 let local = { games: [], players: [], bilans: [], lastSync: 0 };
 let bilans = [];
+let duels = []; // parties entre deux joueurs du groupe, gardées dans Firestore pour toujours
 let remote = null; // fonctions d'écriture Firestore quand un groupe est ouvert
 
 const lkey = () => 'salle-analyse-v3:' + (S.group || 'local');
@@ -45,6 +46,7 @@ function upsert(arr, o) { const i = arr.findIndex((x) => x.id === o.id); if (i >
 
 function rebuild() {
   const byId = new Map(local.games.map((g) => [g.id, { ...g, analysis: null }]));
+  for (const d of duels) if (!byId.has(d.id)) byId.set(d.id, { ...d, analysis: null });
   for (const b of bilans) { const g = byId.get(b.id); if (g) g.analysis = b.analysis; else byId.set(b.id, b); }
   S.games = [...byId.values()];
   if (S.game && !S.game.sample) S.game = S.games.find((x) => x.id === S.game.id) || S.game;
@@ -79,7 +81,7 @@ async function initStore() {
 
 function leaveCurrent() {
   if (remote) remote.close();
-  remote = null; S.players = []; bilans = []; local = { games: [], players: [], bilans: [], lastSync: 0 };
+  remote = null; S.players = []; bilans = []; duels = []; local = { games: [], players: [], bilans: [], lastSync: 0 };
   S.game = null; S.gfilter = 'all'; S.editPlayer = null; S.confirm = null;
 }
 
@@ -96,6 +98,7 @@ async function joinGroup(code, name) {
       onInfo: (info) => { if (S.group === code && info.name) { rememberGroup(code, info.name); render(); } },
       onPlayers: (ps) => { if (S.group !== code) return; S.players = ps; S.mode = 'shared'; rebuild(); if (first) { first = false; autoSync(); } },
       onBilans: (bs) => { if (S.group !== code) return; bilans = bs; rebuild(); },
+      onDuels: (ds) => { if (S.group !== code) return; duels = ds; rebuild(); },
       onError: (e) => { S.flash = { t: 'err', m: 'Le partage ne répond pas (' + (e && (e.code || e.message)) + '). Recharge la page.' }; render(); },
     });
     if (S.group !== code) { r.close(); return; }
@@ -140,6 +143,23 @@ async function saveBilan(g, analysis) {
 function addGames(gs) { gs.forEach((g) => upsert(local.games, g)); saveLocal(); rebuild(); }
 function removeGame(id) { local.games = local.games.filter((x) => x.id !== id); saveLocal(); rebuild(); }
 
+// Une partie « entre nous » : les deux camps sont des joueurs (différents) du groupe.
+function duelSides(g) {
+  const w = playerFor(g.white, g.site); const b = playerFor(g.black, g.site);
+  return w && b && w.id !== b.id ? { w, b } : null;
+}
+// Les duels sont rares : on les range dans Firestore pour qu'ils restent au-delà des 3 mois
+// gardés sur chaque appareil, et que tout le monde ait le même historique.
+async function saveDuels() {
+  if (!remote) return;
+  const have = new Set(duels.map((d) => d.id));
+  for (const g of local.games) {
+    if (have.has(g.id) || !duelSides(g)) continue;
+    const { analysis: _a, sample: _s, ...meta } = g;
+    try { await remote.putDuel(meta); } catch (_) { return; } // règles pas encore publiées : on réessaiera
+  }
+}
+
 /* ---------- Récupération automatique ---------- */
 const IMPORT_MONTHS = 3;
 const IMPORT_RAPID = 300; // par joueur et par site : en pratique, toutes ses rapides des 3 mois
@@ -179,6 +199,7 @@ async function syncGames(players = S.players) {
   const errs = S.sync.errors;
   S.sync = null;
   local.lastSync = Date.now(); saveLocal();
+  saveDuels();
   S.flash = { t: errs.length ? 'err' : 'ok', m: (added ? added + ' nouvelle' + (added > 1 ? 's parties' : ' partie') : 'Aucune nouvelle partie') + '.' + (errs.length ? ' ' + errs.join(' · ') : '') };
   render();
 }
@@ -396,6 +417,7 @@ function render() {
   else if (S.view === 'groupe') html = viewGroup();
   else if (S.view === 'parties') html = viewGames();
   else if (S.view === 'joueurs') html = viewPlayers();
+  else if (S.view === 'duel') html = viewDuel();
   else html = viewAnalysis();
   const ta = $('#pgn'); const keep = ta ? ta.value : null;
   main.innerHTML = flash + html;
@@ -415,6 +437,9 @@ async function copyLink() {
 // Filtres partagés entre les pages Parties et Groupe : changer l'un change les deux.
 function periodSeg() {
   return `<div class="seg" role="group" aria-label="Période">${[['7', '7 jours'], ['30', '30 jours'], ['all', 'Depuis le début']].map(([v, l]) => `<button data-act="period" data-v="${v}" aria-pressed="${S.period === v}">${l}</button>`).join('')}</div>`;
+}
+function betweenSeg() {
+  return `<div class="seg" role="group" aria-label="Adversaires">${[[false, 'Toutes'], [true, 'Entre nous']].map(([v, l]) => `<button data-act="between" data-v="${v}" aria-pressed="${S.between === v}">${l}</button>`).join('')}</div>`;
 }
 function cadenceSeg() {
   return `<div class="seg" role="group" aria-label="Cadence">${[[true, 'Rapides'], [false, 'Toutes cadences']].map(([v, l]) => `<button data-act="cadence" data-v="${v}" aria-pressed="${S.rapidOnly === v}">${l}</button>`).join('')}</div>`;
@@ -485,14 +510,123 @@ function viewGroup() {
       <div class="panel"><div class="eyebrow" style="margin-bottom:6px">Pires gaffes</div>
         ${s.flops.length ? `<div class="hl-list">${s.flops.map((x) => item(x, 'flop')).join('')}</div>` : '<p class="muted small">Aucune gaffe enregistrée sur cette période. Ça ne durera pas.</p>'}</div>
     </div>
+    ${crossTable()}
     <p class="muted small">La précision et les classements imitent la méthode de chess.com (perte de probabilité de gain à chaque coup), mais ne donnent pas exactement les mêmes chiffres. L’Elo estimé vient de la précision moyenne des ${ELO_LAST_GAMES} derniers bilans en rapide (${ELO_MIN_GAMES} minimum), calée sur 2 900 parties chess.com : compte ± ${ELO_AVG_ERR} points.</p>
   </div>`;
+}
+
+/* ---------- Duels : parties entre joueurs du groupe ---------- */
+// Résultat d'une partie du point de vue d'un joueur : 'w', 'd' ou 'l' (null si non terminée).
+function outcome(g, sideOfPlayer) {
+  if (g.result === '1/2-1/2') return 'd';
+  if (g.result !== '1-0' && g.result !== '0-1') return null;
+  return (g.result === '1-0') === (sideOfPlayer === 'w') ? 'w' : 'l';
+}
+// Duels entre a et b (ids), du plus récent au plus ancien, avec le camp de a.
+function duelGames(a, b, games = S.games) {
+  const out = [];
+  for (const g of games) {
+    const d = duelSides(g); if (!d) continue;
+    if (d.w.id === a && d.b.id === b) out.push({ g, side: 'w' });
+    else if (d.w.id === b && d.b.id === a) out.push({ g, side: 'b' });
+  }
+  return out.sort((x, y) => (y.g.end || 0) - (x.g.end || 0) || (y.g.date || '').localeCompare(x.g.date || ''));
+}
+function score(list) {
+  const s = { w: 0, d: 0, l: 0 };
+  for (const { g, side } of list) { const o = outcome(g, side); if (o) s[o]++; }
+  return s;
+}
+const challengeUrl = (p) => 'https://www.chess.com/play/online/new?opponent=' + encodeURIComponent(p.chesscom);
+const challengeBtn = (p, label) => (p.chesscom ? `<a class="btn" href="${esc(challengeUrl(p))}" target="_blank" rel="noopener">${esc(label || 'Défier ' + p.name)} ↗</a>` : '');
+
+// Tableau croisé : la case (ligne A, colonne B) donne les victoires · nulles · défaites de A contre B,
+// sur la période et la cadence choisies.
+function crossTable() {
+  if (S.players.length < 2) return '';
+  const games = S.games.filter((g) => inPeriod(g) && inCadence(g) && duelSides(g));
+  const ps = S.players.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const head = ps.map((p) => `<th class="cx-h" title="${esc(p.name)}">${esc(p.name)}</th>`).join('');
+  const rows = ps.map((a) => `<tr><th class="cx-r">${esc(a.name)}</th>${ps.map((b) => {
+    if (a.id === b.id) return '<td class="cx-self"></td>';
+    const s = score(duelGames(a.id, b.id, games)); const n = s.w + s.d + s.l;
+    const tone = !n ? '' : s.w > s.l ? 'cx-up' : s.w < s.l ? 'cx-down' : 'cx-even';
+    return `<td><button class="cx ${tone}" data-act="duel" data-a="${esc(a.id)}" data-b="${esc(b.id)}" aria-label="${esc(a.name)} contre ${esc(b.name)}">${n ? `${s.w}·${s.d}·${s.l}` : '–'}</button></td>`;
+  }).join('')}</tr>`).join('');
+  return `<div class="panel stack">
+    <div class="row" style="justify-content:space-between"><div><div class="eyebrow">Entre nous</div><h2 class="h2" style="margin-top:4px">Qui a battu qui</h2></div>
+      <span class="small muted">${games.length} partie${games.length > 1 ? 's' : ''} entre vous sur cette période</span></div>
+    <div class="tablewrap"><table class="cross"><thead><tr><th></th>${head}</tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="muted small" style="margin:0">Chaque case : victoires · nulles · défaites du joueur de la ligne contre celui de la colonne. Clique sur une case pour la fiche du duel.</p>
+  </div>`;
+}
+
+function viewDuel() {
+  const A = S.players.find((p) => p.id === S.duel?.a); const B = S.players.find((p) => p.id === S.duel?.b);
+  if (!A || !B) return `<div class="panel empty"><p>Ce duel n’existe plus.</p><button class="btn" data-act="go" data-v="groupe">← Groupe</button></div>`;
+  const list = duelGames(A.id, B.id);
+  const s = score(list);
+  // Série en cours : victoires consécutives du même joueur en partant de la plus récente.
+  let streak = 0, who = null;
+  for (const { g, side } of list) {
+    const o = outcome(g, side); if (!o || o === 'd') break;
+    const winner = o === 'w' ? A : B;
+    if (who && who !== winner) break;
+    who = winner; streak++;
+  }
+  // Précision moyenne de chacun et moments forts, sur les duels qui ont un bilan.
+  const acc = { a: [], b: [] }; let top = null, flop = null;
+  for (const { g, side } of list) {
+    const an = g.analysis; if (!an) continue;
+    const other = side === 'w' ? 'b' : 'w';
+    if (an.acc[side] != null) acc.a.push(an.acc[side]);
+    if (an.acc[other] != null) acc.b.push(an.acc[other]);
+    an.ply.forEach((x, i) => {
+      const mover = moverOf(g, i); const name = (mover === side ? A : B).name;
+      const rank = x.c === 'brilliant' ? 2 : x.c === 'great' ? 1 : 0;
+      if (rank && (!top || rank > top.rank)) top = { g, i, rank, name, c: x.c };
+      if (x.c === 'blunder' && (!flop || x.l > flop.loss)) flop = { g, i, loss: x.l, name };
+    });
+  }
+  const mean = (xs) => (xs.length ? (xs.reduce((p, q) => p + q, 0) / xs.length).toFixed(1) + ' %' : '—');
+  const moment = (x, kind) => (x ? `<button class="hl-item" data-act="open" data-id="${esc(x.g.id)}" data-ply="${x.i + 1}">
+      <span class="b b-${kind === 'top' ? x.c : 'blunder'}">${CLS[kind === 'top' ? x.c : 'blunder'].sym}</span>
+      <span><div class="big">${esc(moveLabel(x.g, x.i))}</div><div class="sub">${esc(x.name)}${x.g.date ? ' · ' + fmtDate(x.g.date) : ''}</div></span>
+      <span class="right">${kind === 'top' ? CLS[x.c].label : '−' + Math.round(x.loss) + ' %'}</span></button>` : `<p class="muted small" style="margin:0">${kind === 'top' ? 'Pas encore de brillant ni de grand coup' : 'Pas encore de gaffe'} dans vos duels analysés.</p>`);
+  const analysed = list.filter((x) => x.g.analysis).length;
+  const games = list.map(({ g, side }) => {
+    const o = outcome(g, side);
+    return `<div class="game"><div style="min-width:0">
+        <div class="vs"><span class="res-dot ${o || ''}">${{ w: 'V', l: 'D', d: '½' }[o] || '?'}</span> ${esc(A.name)} (${side === 'w' ? 'Blancs' : 'Noirs'})</div>
+        <div class="meta">${[fmtDate(g.date), tcLabel(g.tc), g.analysis ? `précision ${g.analysis.acc[side] ?? '–'} % contre ${g.analysis.acc[side === 'w' ? 'b' : 'w'] ?? '–'} %` : 'pas encore de bilan'].filter(Boolean).map(esc).join(' · ')}</div></div>
+      <div class="row"><button class="btn ${g.analysis ? '' : 'primary'}" data-act="open" data-id="${esc(g.id)}" data-ply="0">${g.analysis ? 'Voir le bilan' : 'Faire le bilan'}</button></div></div>`;
+  }).join('');
+  return `<div class="row" style="margin-bottom:12px;justify-content:space-between"><button class="btn ghost" data-act="go" data-v="groupe">← Groupe</button>
+      <button class="btn ghost" data-act="duel" data-a="${esc(B.id)}" data-b="${esc(A.id)}">Inverser ⇄</button></div>
+    <div class="stack">
+      <div class="panel stack">
+        <div class="eyebrow">Fiche duel</div>
+        <div class="duel-head"><div class="duel-name">${esc(A.name)}</div><div class="duel-score mono">${s.w} · ${s.d} · ${s.l}</div><div class="duel-name right">${esc(B.name)}</div></div>
+        <p class="muted small" style="margin:0;text-align:center">victoires · nulles · défaites de ${esc(A.name)}, ${list.length} partie${list.length > 1 ? 's' : ''} en tout${streak >= 2 ? ` · <strong>${esc(who.name)} a gagné les ${streak} dernières</strong>` : ''}</p>
+        <div class="row" style="justify-content:center">${challengeBtn(B, 'Défier ' + B.name + ' sur chess.com')}${challengeBtn(A, 'Défier ' + A.name + ' sur chess.com')}</div>
+        ${!A.chesscom || !B.chesscom ? '<p class="muted small" style="margin:0;text-align:center">Le bouton Défier a besoin du pseudo chess.com du joueur (onglet Joueurs).</p>' : ''}
+      </div>
+      <div class="grid2">
+        <div class="panel stack"><div class="eyebrow">Précision moyenne dans vos duels</div>
+          <div class="acc-duo"><div class="acc-card"><div class="p">${esc(A.name)}</div><div class="n mono">${mean(acc.a)}</div></div><div class="acc-card"><div class="p">${esc(B.name)}</div><div class="n mono">${mean(acc.b)}</div></div></div>
+          <p class="muted small" style="margin:0">Sur ${analysed} duel${analysed > 1 ? 's' : ''} avec bilan.</p></div>
+        <div class="panel stack"><div class="eyebrow">Moments forts</div>
+          <div class="hl-list">${moment(top, 'top')}${moment(flop, 'flop')}</div></div>
+      </div>
+      <div class="panel"><h2 class="h2" style="margin-bottom:6px">Leurs parties</h2>${games || '<p class="muted">Pas encore de partie entre vous. Le bouton Défier est là pour ça.</p>'}</div>
+    </div>`;
 }
 
 function viewGames() {
   const opts = ['<option value="all">Tous les joueurs</option>', ...S.players.map((p) => `<option value="${esc(p.id)}" ${S.gfilter === p.id ? 'selected' : ''}>${esc(p.name)}</option>`)].join('');
   let games = S.games.filter((g) => inCadence(g) && inPeriod(g));
   if (S.gfilter !== 'all') games = games.filter((g) => [g.white, g.black].some((u) => { const p = playerFor(u, g.site); return p && p.id === S.gfilter; }));
+  if (S.between) games = games.filter(duelSides);
   games.sort((a, b) => (b.end || 0) - (a.end || 0) || (b.date || '').localeCompare(a.date || '') || (b.addedAt || '').localeCompare(a.addedAt || ''));
   const total = games.length; games = games.slice(0, S.limit);
   const list = games.length ? games.map((g) => {
@@ -503,14 +637,14 @@ function viewGames() {
       <div style="min-width:0">
         <div class="vs">${esc(W.name)}${g.wElo ? ' <span class="muted small">(' + esc(g.wElo) + ')</span>' : ''} <span class="muted">–</span> ${esc(B.name)}${g.bElo ? ' <span class="muted small">(' + esc(g.bElo) + ')</span>' : ''} <span class="mono muted small">${esc(g.result)}</span></div>
         <div class="meta">${[fmtDate(g.date), tcLabel(g.tc), src, Math.ceil(g.plies / 2) + ' coups'].filter(Boolean).map(esc).join(' · ')}</div>
-        <div class="row" style="margin-top:6px;gap:6px">${a ? `<span class="chip acc">Blancs ${a.acc.w ?? '–'} %</span><span class="chip acc">Noirs ${a.acc.b ?? '–'} %</span>` : '<span class="chip">Pas encore de bilan</span>'}</div>
+        <div class="row" style="margin-top:6px;gap:6px">${duelSides(g) ? '<span class="chip duel">Entre nous</span>' : ''}${a ? `<span class="chip acc">Blancs ${a.acc.w ?? '–'} %</span><span class="chip acc">Noirs ${a.acc.b ?? '–'} %</span>` : '<span class="chip">Pas encore de bilan</span>'}</div>
       </div>
       <div class="row">
         <button class="btn ${a ? '' : 'primary'}" data-act="open" data-id="${esc(g.id)}" data-ply="0">${a ? 'Voir le bilan' : 'Faire le bilan'}</button>
         ${g.timeClass ? '' : conf ? `<button class="btn danger" data-act="delgame" data-id="${esc(g.id)}">Confirmer la suppression</button><button class="btn ghost" data-act="unconfirm">Annuler</button>`
                : `<button class="btn ghost" data-act="confirm" data-v="g:${esc(g.id)}" aria-label="Supprimer la partie">Supprimer</button>`}
       </div></div>`;
-  }).join('') : `<p class="muted">${S.games.length ? 'Aucune partie pour ce filtre.' : S.players.length ? 'Aucune partie pour l’instant : lance la récupération ci-dessus.' : 'Ajoute d’abord les joueurs du groupe, leurs parties arriveront toutes seules.'}</p>`;
+  }).join('') : `<p class="muted">${S.between && S.games.length ? 'Aucune partie entre vous sur ce filtre. Défiez-vous depuis l’onglet Groupe !' : S.games.length ? 'Aucune partie pour ce filtre.' : S.players.length ? 'Aucune partie pour l’instant : lance la récupération ci-dessus.' : 'Ajoute d’abord les joueurs du groupe, leurs parties arriveront toutes seules.'}</p>`;
   const more = total > games.length ? `<div class="row" style="justify-content:center;margin-top:10px"><button class="btn" data-act="more">Afficher plus (${total - games.length} restantes)</button></div>` : '';
   const sync = S.sync
     ? `<div class="prog"><i style="width:${(100 * S.sync.done) / (S.sync.total || 1)}%"></i></div><span class="small muted">Récupération : joueur ${Math.min(S.sync.done + 1, S.sync.total)} sur ${S.sync.total}…</span>`
@@ -528,7 +662,7 @@ function viewGames() {
     </div>
     <div class="panel">
       <div class="row" style="justify-content:space-between;margin-bottom:6px"><h2 class="h2">Parties du groupe</h2>
-        <div class="row">${cadenceSeg()}${periodSeg()}<label class="f" style="flex:0 1 200px"><select id="gfilter" aria-label="Filtrer par joueur">${opts}</select></label></div></div>
+        <div class="row">${betweenSeg()}${cadenceSeg()}${periodSeg()}<label class="f" style="flex:0 1 200px"><select id="gfilter" aria-label="Filtrer par joueur">${opts}</select></label></div></div>
       ${list}${more}
     </div></div>`;
 }
@@ -539,7 +673,7 @@ function viewPlayers() {
     const conf = S.confirm === 'p:' + p.id;
     return `<div class="game"><div style="min-width:0"><div class="vs">${esc(p.name)}</div>
       <div class="meta">${esc([p.chesscom && 'chess.com : ' + p.chesscom, p.lichess && 'Lichess : ' + p.lichess].filter(Boolean).join(' · ') || 'Aucun pseudo')}</div></div>
-      <div class="row"><button class="btn" data-act="editp" data-id="${esc(p.id)}">Modifier</button>
+      <div class="row">${challengeBtn(p, 'Défier')}<button class="btn" data-act="editp" data-id="${esc(p.id)}">Modifier</button>
       ${conf ? `<button class="btn danger" data-act="delp" data-id="${esc(p.id)}">Confirmer</button><button class="btn ghost" data-act="unconfirm">Annuler</button>` : `<button class="btn ghost" data-act="confirm" data-v="p:${esc(p.id)}">Retirer</button>`}</div></div>`;
   }).join('') : '<p class="muted">Personne pour l’instant. Commence par toi.</p>';
   return `<div class="grid2">
@@ -755,6 +889,8 @@ document.addEventListener('click', async (ev) => {
   else if (act === 'open') { const g = S.games.find((x) => x.id === t.dataset.id); if (g) openGame(g, +t.dataset.ply || 0); }
   else if (act === 'addpgn') addPgn();
   else if (act === 'sync') syncGames();
+  else if (act === 'duel') { S.duel = { a: t.dataset.a, b: t.dataset.b }; S.view = 'duel'; S.flash = null; render(); scrollTo({ top: 0 }); }
+  else if (act === 'between') { S.between = v === 'true'; S.limit = 40; render(); }
   else if (act === 'cadence') { S.rapidOnly = v === 'true'; S.limit = 40; render(); }
   else if (act === 'more') { S.limit += 40; render(); }
   else if (act === 'confirm') { S.confirm = v; render(); }

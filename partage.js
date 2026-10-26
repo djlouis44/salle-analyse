@@ -2,6 +2,7 @@
 //   groupes/<code>          : { name } (nom affiché du groupe)
 //   joueurs/<id>            : { name, chesscom, lichess }
 //   bilans/<id>             : la partie (PGN et infos) + son bilan, pour que tout le groupe le voie
+//   duels/<id>              : les parties entre deux joueurs du groupe (PGN et infos, sans bilan)
 // Les parties elles-mêmes ne sont pas stockées : chaque appareil les récupère sur chess.com
 // et Lichess. Ça garde le nombre de lectures loin du quota gratuit.
 import { firebaseConfig } from './firebase-config.js';
@@ -37,7 +38,7 @@ async function init() {
 
 // Ouvre un groupe et écoute les changements en direct. Renvoie les fonctions d'écriture,
 // et close() pour arrêter l'écoute quand on passe à un autre groupe.
-export async function openGroup(code, { onInfo, onPlayers, onBilans, onError }) {
+export async function openGroup(code, { onInfo, onPlayers, onBilans, onDuels, onError }) {
   await init();
   const base = 'groupes/' + code + '/';
   const unsubs = [
@@ -45,6 +46,8 @@ export async function openGroup(code, { onInfo, onPlayers, onBilans, onError }) 
     fs.onSnapshot(fs.doc(db, 'groupes', code), (d) => onInfo(d.exists() ? d.data() : {}), () => onInfo({})),
     fs.onSnapshot(fs.collection(db, base + 'joueurs'), (s) => onPlayers(s.docs.map((d) => ({ ...d.data(), id: d.id }))), onError),
     fs.onSnapshot(fs.collection(db, base + 'bilans'), (s) => onBilans(s.docs.map((d) => ({ ...d.data(), id: d.id }))), onError),
+    // Comme le nom : sans les nouvelles règles, pas de duels partagés, mais rien ne casse.
+    fs.onSnapshot(fs.collection(db, base + 'duels'), (s) => onDuels(s.docs.map((d) => ({ ...d.data(), id: d.id }))), () => onDuels([])),
   ];
   return {
     close: () => unsubs.forEach((u) => u()),
@@ -52,5 +55,6 @@ export async function openGroup(code, { onInfo, onPlayers, onBilans, onError }) 
     putPlayer: ({ id, ...p }) => fs.setDoc(fs.doc(db, base + 'joueurs', id), p),
     delPlayer: (id) => fs.deleteDoc(fs.doc(db, base + 'joueurs', id)),
     putBilan: ({ id, ...b }) => fs.setDoc(fs.doc(db, base + 'bilans', id), b),
+    putDuel: ({ id, ...d }) => fs.setDoc(fs.doc(db, base + 'duels', id), d),
   };
 }
