@@ -2,12 +2,14 @@
 import { Chess } from './chess.js';
 
 // Mêmes catégories que le bilan chess.com (Classification V2, support.chess.com, article 8572705).
-// Seuils de perte d'espérance de points : Excellent < 2, Bon < 5, Imprécision < 10, Erreur < 20, Gaffe au-delà.
+// Seuils de perte d'espérance de points : Très bien < 2, Bon < 5, Imprécision < 10, Erreur < 20, Gaffe au-delà.
+// Libellés relevés sur un vrai bilan chess.com en français (2026-10-26) : le « ! » (Great) s'y
+// appelle « Excellent » et le pouce (Excellent) « Très bien ».
 export const CLS = {
   brilliant:  { label: 'Brillant',      sym: '!!' },
-  great:      { label: 'Très bon coup', sym: '!' },
+  great:      { label: 'Excellent',     sym: '!' },
   best:       { label: 'Meilleur',      sym: '★' },
-  excellent:  { label: 'Excellent',     sym: '✓' },
+  excellent:  { label: 'Très bien',     sym: '✓' },
   good:       { label: 'Bon',           sym: '✓' },
   book:       { label: 'Théorique',     sym: '≡' },
   inaccuracy: { label: 'Imprécision',   sym: '?!' },
@@ -155,6 +157,19 @@ export function classify(loss, isBest) {
 
 const BAD = ['inaccuracy', 'mistake', 'miss', 'blunder'];
 
+// Mat en n pour le camp `color`, lu dans l'évaluation enregistrée (point de vue des Blancs), sinon null.
+function mateIn(color, e) {
+  const m = /^(-?)M(\d+)$/.exec(e || '');
+  return m && (m[1] === '') === (color === 'w') ? +m[2] : null;
+}
+// Calé sur un bilan chess.com du 2026-10-26 (partie 185975480636) : 3 « Manqué » sur 3 retrouvés.
+function missedMate(color, before, after) {
+  const nb = mateIn(color, before);
+  if (nb == null || nb > 5 || ['1-0', '0-1', '½'].includes(after)) return false;
+  const na = mateIn(color, after);
+  return na == null || (nb <= 2 && na > nb);
+}
+
 // hist = historique verbeux chess.js ; pos = positions résumées (hist.length + 1) ;
 // book = base d'ouvertures (loadBook), facultative.
 export function buildAnalysis(hist, pos, depth, book) {
@@ -169,7 +184,8 @@ export function buildAnalysis(hist, pos, depth, book) {
     const exact = A.b === m.lan;
     // Si le coup joué est celui du moteur, l'écart vient seulement de l'horizon de calcul.
     const loss = exact ? 0 : Math.max(0, wpB - wpA);
-    let cls = classify(loss, exact || loss < 0.3);
+    // « Meilleur » seulement pour le coup du moteur, comme chess.com ; un autre coup sans perte est « Très bien ».
+    let cls = classify(loss, exact);
     // Théorique : tant que la partie reste dans la base d'ouvertures (un piège qui perd gros en sort).
     if (inBook && loss < 10 && openingName(book, m.after)) cls = 'book';
     else {
@@ -179,6 +195,8 @@ export function buildAnalysis(hist, pos, depth, book) {
       // Manqué : l'adversaire vient de se tromper et offrait une position gagnante, on la laisse passer.
       else if ((cls === 'mistake' || cls === 'blunder') && i > 0 && BAD.includes(ply[i - 1].c)
         && wpB >= 70 && 100 - pos[i - 1].stm < 70 && wpA < 70) cls = 'miss';
+      // Manqué aussi : un mat forcé laissé passer (mat en 5 ou moins perdu, ou mat en 1-2 rallongé).
+      else if (cls !== 'brilliant' && missedMate(m.color, A.e, B.e)) cls = 'miss';
     }
     ply.push({ c: cls, l: +loss.toFixed(1) });
   }
@@ -221,7 +239,11 @@ export function explainMove(hist, a, i, book) {
     case 'best': return 'C’est le coup que le moteur aurait joué.';
     case 'excellent': return `Presque aussi fort que le meilleur coup${best ? ` (${best})` : ''}.`;
     case 'good': return best ? `Correct, mais ${best} était plus précis.` : 'Un coup correct.';
-    case 'miss': return `Occasion manquée : après l’erreur adverse, ${best || 'un autre coup'} donnait une position gagnante.`;
+    case 'miss': {
+      const n = mateIn(m.color, A && A.e);
+      if (n) return `Occasion manquée : il y avait un mat en ${n}${best ? `, à commencer par ${best}` : ''}.`;
+      return `Occasion manquée : après l’erreur adverse, ${best || 'un autre coup'} donnait une position gagnante.`;
+    }
     default: {
       const head = { inaccuracy: 'Il y avait plus précis.', mistake: 'Ce coup coûte cher.', blunder: 'Grosse faute.' }[cls] || '';
       return [head, replyText(m, B), best ? `Il fallait jouer ${best}.` : ''].filter(Boolean).join(' ');

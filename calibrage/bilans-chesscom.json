@@ -1,0 +1,17 @@
+{
+  "description": "Vrais bilans chess.com relevés coup par coup (compte djlouis445, interface en français), pour caler le classement des coups. Une lettre par demi-coup : ! brillant, g excellent (le « ! » de chess.com), * meilleur, e très bien, o bon, k théorique, i imprécision, m erreur, x manqué, b gaffe. « nous_p12 » et « nous_p15 » : notre classement après les corrections du 2026-10-26 (Meilleur réservé au coup du moteur, mats manqués en Manqué).",
+  "bilans": [
+    {
+      "u": "185975480636",
+      "date": "2026-10-26",
+      "elo": [553, 560],
+      "precision_chesscom": [72.48, 80.43],
+      "precision_nous_p15": [72.9, 80.0],
+      "chesscom": "kkkooeoooemx**eeoig*oio*o*x*bgmo*eoe****e*eeeee*e*e*eeo*ie*o*ei*exeom*exeeex*o*eeeeem*e*eei*",
+      "nous_p12": "kkkooeooe*im**eeoi**mmo***mebgie*io***e*eeeeeo**o*eeooeoo*eee*o*exoxoeexoxixee*e*e**o!e*oee*",
+      "nous_p15": "kkkoieooo*im**eeomg*mme***m*bgio*eee**e*e**eeo***ee*oeeeoo*e**e*exexeeexeeex*e*e*e**mii*eee*",
+      "accord": "avant corrections : 38/92 (p12), 46/92 (p15) ; après : 45/92, 56/92",
+      "notes": "Les deux « Compétence » affichées par le coach (coups 64 et 92) valent « Meilleur » d'après le tableau récapitulatif. Écarts restants surtout dans les positions déjà jouées d'avance (+5 et plus) : le meilleur coup de notre moteur diffère du leur, d'où Meilleur contre Très bien."
+    }
+  ]
+}

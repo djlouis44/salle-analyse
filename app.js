@@ -1,6 +1,6 @@
 import { Chess } from './chess.js';
 import { CLS, ORDER, summarizePosition, buildAnalysis, parseInfo, estimateGameElo, estimatePlayerElo, eloText, loadBook, explainMove, withAccuracy,
-  ELO_MIN_MOVES, ELO_MIN_GAMES, ELO_LAST_GAMES, ELO_GAME_ERR, ELO_AVG_ERR } from './core.js?v=2';
+  ELO_MIN_MOVES, ELO_MIN_GAMES, ELO_LAST_GAMES, ELO_GAME_ERR, ELO_AVG_ERR } from './core.js?v=3';
 import { playerGames } from './sources.js';
 import { enabled as sharing, openGroup, newCode, cleanCode } from './partage.js';
 
@@ -513,7 +513,7 @@ function viewGroup() {
     ${note}
     <div class="grid2">
       <div class="panel"><div class="eyebrow" style="margin-bottom:6px">Meilleurs coups</div>
-        ${s.tops.length ? `<div class="hl-list">${s.tops.map((x) => item(x, 'top')).join('')}</div>` : '<p class="muted small">Pas encore de coup brillant ou de très bon coup sur cette période.</p>'}</div>
+        ${s.tops.length ? `<div class="hl-list">${s.tops.map((x) => item(x, 'top')).join('')}</div>` : '<p class="muted small">Pas encore de coup brillant ou excellent sur cette période.</p>'}</div>
       <div class="panel"><div class="eyebrow" style="margin-bottom:6px">Pires gaffes</div>
         ${s.flops.length ? `<div class="hl-list">${s.flops.map((x) => item(x, 'flop')).join('')}</div>` : '<p class="muted small">Aucune gaffe enregistrée sur cette période. Ça ne durera pas.</p>'}</div>
     </div>
@@ -599,7 +599,7 @@ function viewDuel() {
   const moment = (x, kind) => (x ? `<button class="hl-item" data-act="open" data-id="${esc(x.g.id)}" data-ply="${x.i + 1}">
       <span class="b b-${kind === 'top' ? x.c : 'blunder'}">${CLS[kind === 'top' ? x.c : 'blunder'].sym}</span>
       <span><div class="big">${esc(moveLabel(x.g, x.i))}</div><div class="sub">${esc(x.name)}${x.g.date ? ' · ' + fmtDate(x.g.date) : ''}</div></span>
-      <span class="right">${kind === 'top' ? CLS[x.c].label : '−' + Math.round(x.loss) + ' %'}</span></button>` : `<p class="muted small" style="margin:0">${kind === 'top' ? 'Pas encore de brillant ni de très bon coup' : 'Pas encore de gaffe'} dans vos duels analysés.</p>`);
+      <span class="right">${kind === 'top' ? CLS[x.c].label : '−' + Math.round(x.loss) + ' %'}</span></button>` : `<p class="muted small" style="margin:0">${kind === 'top' ? 'Pas encore de coup brillant ni excellent' : 'Pas encore de gaffe'} dans vos duels analysés.</p>`);
   const analysed = list.filter((x) => x.g.analysis).length;
   const games = list.map(({ g, side }) => {
     const o = outcome(g, side);
