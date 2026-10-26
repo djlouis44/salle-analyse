@@ -1,6 +1,12 @@
 # Licences des composants tiers
 
-Le projet est distribué sous GPL v3 (voir `LICENSE`). Il embarque deux composants tiers.
+Le projet est distribué sous GPL v3 (voir `LICENSE`). Il embarque trois composants tiers.
+
+## Base d'ouvertures Lichess (chess-openings)
+
+- Fichier : `ouvertures.json`, construit le 2026-10-26 à partir des fichiers `a.tsv` à `e.tsv` de
+  https://github.com/lichess-org/chess-openings (positions de chaque ligne, réduites à une empreinte, et noms).
+- Licence : domaine public, CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/).
 
 ## Stockfish 18 (stockfish.js 18.0.8)
 

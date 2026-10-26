@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calibrage chess.com</title>
+<style>
+body{margin:0;background:#17110D;color:#F1E6D2;font:14px/1.5 system-ui,sans-serif;padding:24px}
+h1{font-size:20px;margin:0 0 8px}
+pre{background:#221912;border:1px solid #3A2C20;border-radius:8px;padding:12px;max-height:60vh;overflow:auto;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<h1>Calibrage : nos bilans contre ceux de chess.com</h1>
+<p>Outil de développement. Récupère des parties rapides chess.com qui ont déjà un bilan (précision officielle),
+les analyse avec notre moteur et garde, coup par coup, ce qu'il faut pour caler nos formules.
+Paramètres dans l'adresse : <code>?n=60&amp;depth=12&amp;workers=4</code>.</p>
+<pre id="log"></pre>
+<script type="module" src="calibrer.js"></script>
+</body>
+</html>

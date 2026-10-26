@@ -1,17 +1,40 @@
 // Logique du bilan : conversion des évaluations, classement des coups, précision.
 import { Chess } from './chess.js';
 
+// Mêmes catégories que le bilan chess.com (Classification V2, support.chess.com, article 8572705).
+// Seuils de perte d'espérance de points : Excellent < 2, Bon < 5, Imprécision < 10, Erreur < 20, Gaffe au-delà.
 export const CLS = {
-  brilliant:  { label: 'Brillant',    sym: '!!', desc: 'un sacrifice qui tient la route' },
-  great:      { label: 'Grand coup',  sym: '!',  desc: 'le seul coup qui garde l’avantage' },
-  best:       { label: 'Meilleur',    sym: '★', desc: 'le coup du moteur' },
-  excellent:  { label: 'Excellent',   sym: '✓', desc: 'presque aussi fort que le meilleur coup' },
-  good:       { label: 'Bon',         sym: '✓', desc: 'un coup correct' },
-  inaccuracy: { label: 'Imprécision', sym: '?!', desc: 'une petite perte' },
-  mistake:    { label: 'Erreur',      sym: '?',  desc: 'une vraie perte d’avantage' },
-  blunder:    { label: 'Gaffe',       sym: '??', desc: 'un coup qui change la partie' },
+  brilliant:  { label: 'Brillant',      sym: '!!' },
+  great:      { label: 'Très bon coup', sym: '!' },
+  best:       { label: 'Meilleur',      sym: '★' },
+  excellent:  { label: 'Excellent',     sym: '✓' },
+  good:       { label: 'Bon',           sym: '✓' },
+  book:       { label: 'Théorique',     sym: '≡' },
+  inaccuracy: { label: 'Imprécision',   sym: '?!' },
+  mistake:    { label: 'Erreur',        sym: '?' },
+  miss:       { label: 'Manqué',        sym: '✗' },
+  blunder:    { label: 'Gaffe',         sym: '??' },
 };
-export const ORDER = ['brilliant', 'great', 'best', 'excellent', 'good', 'inaccuracy', 'mistake', 'blunder'];
+export const ORDER = ['brilliant', 'great', 'best', 'excellent', 'good', 'book', 'inaccuracy', 'mistake', 'miss', 'blunder'];
+
+// Positions théoriques (base Lichess chess-openings, CC0), clé = FNV-1a des 3 premiers champs du FEN.
+// Fichier construit une fois : ouvertures.json { names, pos: { hash: index du nom } }.
+let BOOK = null;
+export async function loadBook() {
+  if (BOOK) return BOOK;
+  try { const r = await fetch(new URL('./ouvertures.json?v=1', import.meta.url)); BOOK = r.ok ? await r.json() : { names: [], pos: {} }; } catch (_) { BOOK = { names: [], pos: {} }; }
+  return BOOK;
+}
+function fnv(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(36);
+}
+export function openingName(book, fen) {
+  if (!book) return null;
+  const i = book.pos[fnv(fen.split(' ').slice(0, 3).join(' '))];
+  return i == null ? null : book.names[i];
+}
 
 const VAL = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 50 };
 
@@ -77,9 +100,42 @@ function isRecapture(hist, i) {
   return i > 0 && !!hist[i - 1].captured && hist[i - 1].to === hist[i].to;
 }
 
+// Précision calée sur celle de chess.com le 2026-10-26 (calibrage/calibrer.html + caler.js) :
+// 90 parties rapides de 100 à 2 400 Elo déjà passées au bilan chez eux, profondeur 12.
+// Même forme que la formule de Lichess, deux réglages changés : une courbe de chances de gain
+// plus plate (ACC_K) et une pénalité plus forte par point perdu (ACC_C).
+// Écart moyen avec chess.com : 3,8 points (4,0 sur des parties hors calage), contre 10,9 avec
+// la formule de Lichess et 5,7 avec l'ancienne droite de conversion.
+// La courbe de classement des coups (wpLine) ne change pas tant qu'on ne l'a pas comparée à de
+// vrais bilans chess.com coup par coup.
+const ACC_K = 0.00258, ACC_C = 0.1015;
 export function moveAccuracy(loss) {
-  return Math.max(0, Math.min(100, 103.1668 * Math.exp(-0.04354 * loss) - 3.1669));
+  return Math.max(0, Math.min(100, 103.1668 * Math.exp(-ACC_C * loss) - 3.1669));
 }
+// Chances de gain des Blancs (0-100) lues dans l'évaluation enregistrée (« +1.2 », « -M3 », « 1-0 »…).
+function wpWhite(e) {
+  if (!e || e === '?') return null;
+  if (e === '1-0' || e.startsWith('M')) return 100;
+  if (e === '0-1' || e.startsWith('-M')) return 0;
+  if (e === '½') return 50;
+  return 50 + 50 * (2 / (1 + Math.exp(-ACC_K * parseFloat(e) * 100)) - 1);
+}
+// Précision des deux camps à partir d'un bilan enregistré : marche aussi pour les anciens bilans,
+// sans relancer le moteur (l'arrondi des évaluations au dixième de pion ne change rien de mesurable).
+export function accuracyOf(a, first = 'w') {
+  const acc = { w: [], b: [] };
+  a.ply.forEach((p, i) => {
+    const mover = (i % 2 === 0) === (first === 'w') ? 'w' : 'b';
+    let loss = 0;
+    if (p.l > 0) {
+      const x = wpWhite(a.pos[i].e); const y = wpWhite(a.pos[i + 1].e);
+      loss = x == null || y == null ? p.l : Math.max(0, mover === 'w' ? x - y : y - x);
+    }
+    acc[mover].push(moveAccuracy(loss));
+  });
+  return { w: gameAccuracy(acc.w), b: gameAccuracy(acc.b) };
+}
+export const withAccuracy = (a, first) => (a && a.ply && a.pos ? { ...a, acc: accuracyOf(a, first) } : a);
 
 export function gameAccuracy(arr) {
   if (!arr.length) return null;
@@ -97,10 +153,13 @@ export function classify(loss, isBest) {
   return 'blunder';
 }
 
-// hist = historique verbeux chess.js ; pos = positions résumées (hist.length + 1)
-export function buildAnalysis(hist, pos, depth) {
+const BAD = ['inaccuracy', 'mistake', 'miss', 'blunder'];
+
+// hist = historique verbeux chess.js ; pos = positions résumées (hist.length + 1) ;
+// book = base d'ouvertures (loadBook), facultative.
+export function buildAnalysis(hist, pos, depth, book) {
   const ply = [];
-  const acc = { w: [], b: [] };
+  let inBook = !!book;
   for (let i = 0; i < hist.length; i++) {
     const m = hist[i];
     const A = pos[i];
@@ -111,20 +170,63 @@ export function buildAnalysis(hist, pos, depth) {
     // Si le coup joué est celui du moteur, l'écart vient seulement de l'horizon de calcul.
     const loss = exact ? 0 : Math.max(0, wpB - wpA);
     let cls = classify(loss, exact || loss < 0.3);
-    if ((cls === 'best' || cls === 'excellent') && wpB < 95 && wpA >= 50 && isSacrifice(m)) cls = 'brilliant';
-    else if (cls === 'best' && exact && A.gap != null && A.gap >= 15 && wpB < 95 && !isRecapture(hist, i)) cls = 'great';
-    const a = moveAccuracy(loss);
-    ply.push({ c: cls, l: +loss.toFixed(1), a: Math.round(a) });
-    acc[m.color].push(a);
+    // Théorique : tant que la partie reste dans la base d'ouvertures (un piège qui perd gros en sort).
+    if (inBook && loss < 10 && openingName(book, m.after)) cls = 'book';
+    else {
+      inBook = false;
+      if ((cls === 'best' || cls === 'excellent') && wpB < 95 && wpA >= 50 && isSacrifice(m)) cls = 'brilliant';
+      else if (cls === 'best' && exact && A.gap != null && A.gap >= 15 && wpB < 95 && !isRecapture(hist, i)) cls = 'great';
+      // Manqué : l'adversaire vient de se tromper et offrait une position gagnante, on la laisse passer.
+      else if ((cls === 'mistake' || cls === 'blunder') && i > 0 && BAD.includes(ply[i - 1].c)
+        && wpB >= 70 && 100 - pos[i - 1].stm < 70 && wpA < 70) cls = 'miss';
+    }
+    ply.push({ c: cls, l: +loss.toFixed(1) });
   }
-  return {
-    v: 1,
+  const out = {
+    v: 2,
     depth,
     at: new Date().toISOString(),
     pos: pos.map((x) => ({ w: x.w, e: x.e, b: x.b || null, bs: x.bs || null })),
     ply,
-    acc: { w: gameAccuracy(acc.w), b: gameAccuracy(acc.b) },
   };
+  out.acc = accuracyOf(out, hist.length ? hist[0].color : 'w');
+  return out;
+}
+
+// Phrase d'explication d'un coup, calculée à l'affichage (marche aussi pour les anciens bilans).
+const PIECE = { p: 'le pion', n: 'le cavalier', b: 'le fou', r: 'la tour', q: 'la dame', k: 'le roi' };
+const DU = { p: 'du pion', n: 'du cavalier', b: 'du fou', r: 'de la tour', q: 'de la dame', k: 'du roi' };
+const cap = (s) => s[0].toUpperCase() + s.slice(1);
+// Ce que l'adversaire peut faire après le coup : mat, prise, ou sa meilleure réponse.
+function replyText(m, B) {
+  if (!B) return '';
+  const e = B.e || '';
+  if ((e.startsWith('M') && m.color === 'b') || (e.startsWith('-M') && m.color === 'w')) return `Ça permet un mat en ${e.replace('-', '').slice(1)}.`;
+  if (!B.b) return '';
+  let r = null;
+  try { r = new Chess(m.after).move({ from: B.b.slice(0, 2), to: B.b.slice(2, 4), promotion: B.b[4] }); } catch (_) { return ''; }
+  // Une reprise après un échange égal n'est pas une pièce perdue.
+  const trade = r.to === m.to && m.captured && VAL[m.captured] >= VAL[r.captured];
+  if (r.captured && !trade) return `${cap(PIECE[r.captured])} en ${r.to} tombe après ${r.san}.`;
+  return `La bonne réponse adverse : ${r.san}.`;
+}
+export function explainMove(hist, a, i, book) {
+  const m = hist[i]; const cls = a.ply[i].c; const A = a.pos[i]; const B = a.pos[i + 1];
+  const best = A && A.bs && A.bs !== m.san ? A.bs : null;
+  if (m.san.endsWith('#')) return 'Échec et mat.';
+  switch (cls) {
+    case 'book': { const n = openingName(book, m.after); return n ? `Coup connu de la théorie (${n}).` : 'Coup connu de la théorie des ouvertures.'; }
+    case 'brilliant': return `Sacrifice ${DU[m.promotion || m.piece]} qui tient la route : le moteur le valide.`;
+    case 'great': return 'Le seul bon coup de la position : les autres laissaient filer l’avantage.';
+    case 'best': return 'C’est le coup que le moteur aurait joué.';
+    case 'excellent': return `Presque aussi fort que le meilleur coup${best ? ` (${best})` : ''}.`;
+    case 'good': return best ? `Correct, mais ${best} était plus précis.` : 'Un coup correct.';
+    case 'miss': return `Occasion manquée : après l’erreur adverse, ${best || 'un autre coup'} donnait une position gagnante.`;
+    default: {
+      const head = { inaccuracy: 'Il y avait plus précis.', mistake: 'Ce coup coûte cher.', blunder: 'Grosse faute.' }[cls] || '';
+      return [head, replyText(m, B), best ? `Il fallait jouer ${best}.` : ''].filter(Boolean).join(' ');
+    }
+  }
 }
 
 // Elo estimé à partir de la précision. Tables calées le 2026-10-25 sur 2 908 parties rapides
@@ -134,9 +236,9 @@ export function buildAnalysis(hist, pos, depth) {
 // Erreurs mesurées par validation croisée :
 //   - sur une seule partie : ~530 en moyenne, pas mieux qu'un chiffre fixe, d'où « indicatif » ;
 //   - sur la moyenne de 8 à 20 parties d'un joueur : ~220 (contre ~570 pour un chiffre fixe).
-// Nos précisions (formule de type Lichess) sont plus généreuses que celles de chess.com : on les
-// convertit d'abord en « précision chess.com », par une droite mesurée sur des parties chess.com
-// analysées par nous (voir CC_MAP), puis on lit les tables.
+// Depuis le 2026-10-26, notre précision est calée sur celle de chess.com (moveAccuracy) : on lit
+// les tables directement. L'ancienne droite de conversion (−38,36 + 1,305 × précision, erreur ~5
+// à 5,7 points) n'a plus lieu d'être.
 const ELO_GAME = [[54.2, 150], [60.1, 255], [62.4, 350], [65.5, 460], [67.4, 590], [68.7, 735], [69.8, 845],
   [72.1, 1005], [75.1, 1290], [80.5, 1710], [83.2, 2230], [91.3, 2520]];
 const ELO_AVG = [[56.9, 225], [62.7, 385], [66.8, 555], [69.0, 790], [71.0, 995], [73.3, 1225], [80.6, 1950], [83.6, 2320]];
@@ -157,19 +259,12 @@ function readElo(table, acc) {
   }
   return null;
 }
-// Précision chess.com ≈ -38,36 + 1,305 × notre précision. Mesuré le 2026-10-25 sur 30 parties
-// rapides chess.com de 180 à 2 330 Elo (60 précisions), bilans en profondeur 12 : nos
-// précisions dépassent les leurs de 12,6 points en moyenne, erreur de la droite ~5 points.
-// Vérifié en profondeur 15 sur 10 de ces parties : précisions quasi identiques (+0,9) et même
-// droite valable (erreur 4,6). Une seule droite suffit donc pour 12 à 17.
-const CC_A = -38.36, CC_B = 1.305;
-export const toChessComAcc = (acc) => (acc == null ? null : Math.max(0, Math.min(100, CC_A + CC_B * acc)));
-export const estimateGameElo = (acc) => readElo(ELO_GAME, toChessComAcc(acc));
+export const estimateGameElo = (acc) => readElo(ELO_GAME, acc);
 // accs : précisions des bilans du joueur, de la plus récente à la plus ancienne.
 export function estimatePlayerElo(accs) {
   const last = accs.slice(0, ELO_LAST_GAMES);
   if (last.length < ELO_MIN_GAMES) return null;
-  const e = readElo(ELO_AVG, last.reduce((s, a) => s + toChessComAcc(a), 0) / last.length);
+  const e = readElo(ELO_AVG, last.reduce((s, a) => s + a, 0) / last.length);
   return e && { ...e, n: last.length };
 }
 export const eloText = (e) => (e.edge === '<' ? 'moins de ' : e.edge === '>' ? 'plus de ' : '≈ ') + e.v;

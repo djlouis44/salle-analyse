@@ -1,12 +1,15 @@
 import { Chess } from './chess.js';
-import { CLS, ORDER, summarizePosition, buildAnalysis, parseInfo, estimateGameElo, estimatePlayerElo, eloText,
-  ELO_MIN_MOVES, ELO_MIN_GAMES, ELO_LAST_GAMES, ELO_GAME_ERR, ELO_AVG_ERR } from './core.js';
+import { CLS, ORDER, summarizePosition, buildAnalysis, parseInfo, estimateGameElo, estimatePlayerElo, eloText, loadBook, explainMove, withAccuracy,
+  ELO_MIN_MOVES, ELO_MIN_GAMES, ELO_LAST_GAMES, ELO_GAME_ERR, ELO_AVG_ERR } from './core.js?v=2';
 import { playerGames } from './sources.js';
 import { enabled as sharing, openGroup, newCode, cleanCode } from './partage.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const MOBILE = matchMedia('(pointer: coarse)').matches || innerWidth < 700;
+// Base d'ouvertures : sert au classement « Théorique » et au nom de l'ouverture dans les explications.
+let BOOKD = null;
+loadBook().then((b) => { BOOKD = b; });
 
 const OPERA_PGN = `[Event "Paris"]
 [Site "Paris FRA"]
@@ -47,7 +50,11 @@ function upsert(arr, o) { const i = arr.findIndex((x) => x.id === o.id); if (i >
 function rebuild() {
   const byId = new Map(local.games.map((g) => [g.id, { ...g, analysis: null }]));
   for (const d of duels) if (!byId.has(d.id)) byId.set(d.id, { ...d, analysis: null });
-  for (const b of bilans) { const g = byId.get(b.id); if (g) g.analysis = b.analysis; else byId.set(b.id, b); }
+  // La précision est recalculée à l'ouverture : les anciens bilans profitent de la formule calée sur chess.com.
+  for (const b of bilans) {
+    const g = byId.get(b.id); const an = withAccuracy(b.analysis, (g || b).first || 'w');
+    if (g) g.analysis = an; else byId.set(b.id, { ...b, analysis: an });
+  }
   S.games = [...byId.values()];
   if (S.game && !S.game.sample) S.game = S.games.find((x) => x.id === S.game.id) || S.game;
   render();
@@ -326,7 +333,7 @@ async function analyze(g) {
   }
   S.job = null;
   if (job.cancel) { render(); return; }
-  const analysis = buildAnalysis(p.hist, pos, depth);
+  const analysis = buildAnalysis(p.hist, pos, depth, await loadBook());
   analysis.sec = Math.round((performance.now() - t0) / 1000);
   g.analysis = analysis;
   if (S.game && S.game.id === g.id) S.game = g;
@@ -506,7 +513,7 @@ function viewGroup() {
     ${note}
     <div class="grid2">
       <div class="panel"><div class="eyebrow" style="margin-bottom:6px">Meilleurs coups</div>
-        ${s.tops.length ? `<div class="hl-list">${s.tops.map((x) => item(x, 'top')).join('')}</div>` : '<p class="muted small">Pas encore de coup brillant ou de grand coup sur cette période.</p>'}</div>
+        ${s.tops.length ? `<div class="hl-list">${s.tops.map((x) => item(x, 'top')).join('')}</div>` : '<p class="muted small">Pas encore de coup brillant ou de très bon coup sur cette période.</p>'}</div>
       <div class="panel"><div class="eyebrow" style="margin-bottom:6px">Pires gaffes</div>
         ${s.flops.length ? `<div class="hl-list">${s.flops.map((x) => item(x, 'flop')).join('')}</div>` : '<p class="muted small">Aucune gaffe enregistrée sur cette période. Ça ne durera pas.</p>'}</div>
     </div>
@@ -592,7 +599,7 @@ function viewDuel() {
   const moment = (x, kind) => (x ? `<button class="hl-item" data-act="open" data-id="${esc(x.g.id)}" data-ply="${x.i + 1}">
       <span class="b b-${kind === 'top' ? x.c : 'blunder'}">${CLS[kind === 'top' ? x.c : 'blunder'].sym}</span>
       <span><div class="big">${esc(moveLabel(x.g, x.i))}</div><div class="sub">${esc(x.name)}${x.g.date ? ' · ' + fmtDate(x.g.date) : ''}</div></span>
-      <span class="right">${kind === 'top' ? CLS[x.c].label : '−' + Math.round(x.loss) + ' %'}</span></button>` : `<p class="muted small" style="margin:0">${kind === 'top' ? 'Pas encore de brillant ni de grand coup' : 'Pas encore de gaffe'} dans vos duels analysés.</p>`);
+      <span class="right">${kind === 'top' ? CLS[x.c].label : '−' + Math.round(x.loss) + ' %'}</span></button>` : `<p class="muted small" style="margin:0">${kind === 'top' ? 'Pas encore de brillant ni de très bon coup' : 'Pas encore de gaffe'} dans vos duels analysés.</p>`);
   const analysed = list.filter((x) => x.g.analysis).length;
   const games = list.map(({ g, side }) => {
     const o = outcome(g, side);
@@ -760,11 +767,11 @@ function viewAnalysis() {
   else if (!a) comment = `<span><strong>${esc(moveLabel(g, k - 1))}</strong></span>`;
   else {
     const c = CLS[cls]; const pl2 = a.ply[k - 1];
-    let txt = `<strong>${esc(moveLabel(g, k - 1))}</strong> : <span class="t-${cls}" style="font-weight:700">${c.label.toLowerCase()}</span>, ${c.desc}.`;
-    if (!['best', 'brilliant', 'great'].includes(cls) && prevPos && prevPos.bs) txt += ` Le meilleur coup était <strong>${esc(prevPos.bs)}</strong>.`;
-    if (pl2.l >= 2) txt += ` <span class="muted">Chances de gain −${Math.round(pl2.l)} %.</span>`;
-    if (curPos && evalStr(curPos.e)) txt += ` <span class="muted mono">Éval. ${esc(curPos.e)}</span>`;
-    comment = `<span class="b b-${cls}">${c.sym}</span><span>${txt}</span>`;
+    const sub = [prevPos && curPos && evalStr(prevPos.e) && evalStr(curPos.e) ? `Éval. ${esc(prevPos.e)} → ${esc(curPos.e)}` : '', pl2.l >= 2 ? `chances de gain −${Math.round(pl2.l)} %` : ''].filter(Boolean).join(' · ');
+    comment = `<span class="b b-${cls}">${c.sym}</span><div class="cm-body">
+      <div class="cm-title">${esc(moveLabel(g, k - 1))}, <span class="t-${cls}">${c.label.toLowerCase()}</span></div>
+      ${sub ? `<div class="cm-sub mono">${sub}</div>` : ''}
+      <p class="cm-txt">${esc(explainMove(p.hist, a, k - 1, BOOKD))}</p></div>`;
   }
 
   // Colonne de droite
@@ -829,13 +836,13 @@ function viewAnalysis() {
         <div class="boardrow">
           <div class="evalbar ${S.flip ? 'flip' : ''}" aria-label="Barre d’évaluation"><div class="fill" style="height:${wPct}%"></div>
             ${curPos && evalStr(curPos.e) ? `<span class="lab" style="${(wPct >= 50) !== S.flip ? 'bottom:0;color:var(--bfill)' : 'top:0;color:var(--wfill)'}">${esc(curPos.e)}</span>` : ''}</div>
-          <div class="board" id="board">${boardHTML(p.fens[k], last, cls, arrow, S.flip)}</div>
+          <div class="frame"><div class="board" id="board">${boardHTML(p.fens[k], last, cls, arrow, S.flip)}</div></div>
         </div>
         ${pl(botSide)}
         <div class="controls">
           <button class="btn" data-act="ply" data-v="0" aria-label="Début">«</button>
           <button class="btn" data-act="step" data-v="-1" aria-label="Coup précédent">‹</button>
-          <button class="btn" data-act="step" data-v="1" aria-label="Coup suivant">›</button>
+          <button class="btn next" data-act="step" data-v="1" aria-label="Coup suivant">›</button>
           <button class="btn" data-act="ply" data-v="${n}" aria-label="Fin">»</button>
           <button class="btn" data-act="flip" aria-label="Retourner l’échiquier">⇅</button>
         </div>

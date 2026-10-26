@@ -6,8 +6,8 @@ partagés.
 - Chaque joueur enregistre son pseudo chess.com et/ou Lichess : l'appli récupère seule ses
   parties récentes (API publiques, appelées depuis le navigateur).
 - Le bilan est calculé dans le navigateur par Stockfish 18 (WebAssembly, dans un Web Worker) :
-  précision par coup et par partie, classement des coups (brillant, grand coup, meilleur,
-  excellent, bon, imprécision, erreur, gaffe), courbe d'évaluation, meilleur coup.
+  précision par coup et par partie, classement des coups avec les noms de chess.com (brillant, très bon coup, meilleur,
+  excellent, bon, théorique, imprécision, erreur, manqué, gaffe) et une phrase d'explication, courbe d'évaluation, meilleur coup.
 - Un bilan calculé une fois est enregistré dans Firestore et visible par tout le groupe.
 - Page Groupe : classement par précision moyenne, Elo estimé, gaffes par partie, coups
   brillants, victoires, nulles et défaites sur 7 jours, 30 jours ou depuis le début.

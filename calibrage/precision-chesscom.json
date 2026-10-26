@@ -1,5 +1,5 @@
 {
-  "description": "30 parties rapides chess.com (tirées au hasard, 2026-10-25) : Elo des deux joueurs, précision chess.com officielle, et notre précision (core.js) en profondeur 12 et parfois 15. Sert à la droite toChessComAcc de core.js.",
+  "description": "30 parties rapides chess.com (tirées au hasard, 2026-10-25) : Elo des deux joueurs, précision chess.com officielle, et notre précision (core.js) en profondeur 12 et parfois 15. Servait à la droite toChessComAcc de core.js, remplacée le 2026-10-26 par la formule calée sur chesscom-90-parties.json.",
   "droite": { "a": -38.36, "b": 1.305, "erreur_moyenne": 5.0 },
   "parties": [
 {"elo":[486,499],"chesscom":[78.03,92.04],"nous_p12":[91.8,98.1],"nous_p15":[92,98.3]},
