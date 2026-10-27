@@ -12,6 +12,11 @@ partagés.
 - Page Groupe : classement par précision moyenne, Elo estimé, gaffes par partie, coups
   brillants, victoires, nulles et défaites sur 7 jours, 30 jours ou depuis le début.
 - Plusieurs groupes possibles sur un même appareil, avec un menu pour passer de l'un à l'autre.
+- File d'analyse : chacun dit qui il est sur son appareil (« Je suis »), puis lance d'un coup le
+  bilan de toutes ses parties qui n'en ont pas. Chacun ne calcule que les siennes.
+- Gazette du club (onglet Gazette) : la semaine du groupe (le plus acharné, meilleure précision,
+  coup et gaffe de la semaine, remontée, craquage, progression Elo, duels), 3 défis tirés au sort
+  chaque lundi et comptés tout seuls, et les records du club. Calculs dans `gazette.js`.
 
 ## Elo estimé
 
@@ -33,6 +38,7 @@ Firestore sont dans `firestore.rules`.
 | `index.html`, `style.css`, `app.js` | Interface |
 | `core.js` | Calcul du bilan (probabilité de gain, précision, classement des coups) |
 | `sources.js` | Récupération des parties chess.com et Lichess |
+| `gazette.js` | Gazette, records et défis de la semaine (calculs) |
 | `partage.js`, `firebase-config.js` | Partage dans Firestore |
 | `moteur/` | Stockfish 18 lite single-threaded |
 | `chess.js` | Règles des échecs et lecture des PGN |

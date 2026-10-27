@@ -206,6 +206,44 @@ a.btn{text-decoration:none;display:inline-block;color:inherit}
 .cmp{font-size:12px;color:var(--muted);margin-top:2px}
 .elo{font-size:13px;font-weight:600;margin-top:6px;padding-top:6px;border-top:1px solid var(--line);cursor:help}
 .elo .mono{font-size:15px}
+/* Gazette : cartes de la semaine, défis, records */
+.wk{gap:2px}
+.wk .btn{padding:6px 12px;font-size:18px;line-height:1}
+.gz-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+.gz-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.gz-t{font-family:var(--f-display);font-size:26px;font-weight:700;line-height:1.1;display:flex;flex-wrap:wrap;align-items:center;gap:8px;overflow-wrap:anywhere}
+.gz-t .mono{font-family:var(--f-mono);font-size:19px;font-weight:600}
+.gz-t .b{min-width:28px;height:28px;font-size:13px}
+.gz-s{font-size:13px;color:var(--muted)}
+.gz-open{align-self:flex-start;margin-top:auto;padding:6px 0;color:var(--accent)}
+.gz-duels{display:flex;flex-direction:column}
+.gz-duel{display:flex;justify-content:space-between;gap:10px;border:0;border-top:1px solid var(--line);background:transparent;padding:7px 0;text-align:left;font-size:14px;font-weight:600}
+.gz-duel:first-child{border-top:0}
+.gz-duel:hover{color:var(--accent)}
+.gz-duel .muted{font-weight:400;font-size:12.5px;white-space:nowrap}
+.ch{border-top:1px solid var(--line);padding-top:14px;display:flex;flex-direction:column;gap:6px}
+.ch-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:4px}
+.ch-head .chip{white-space:nowrap}
+.ch-t{font-family:var(--f-display);font-size:21px;font-weight:700;line-height:1.1}
+.ch-row{display:grid;grid-template-columns:minmax(0,130px) minmax(0,1fr) 60px;gap:12px;align-items:center;font-size:14px}
+.ch-row .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.ch-row .prog{height:6px}
+.ch-row .mono{text-align:right;color:var(--muted)}
+.ch-row.done .prog i{background:var(--c-best)}
+.ch-row.done .mono{color:var(--c-best);font-weight:600}
+.recs{display:flex;flex-direction:column}
+.rec{display:grid;grid-template-columns:minmax(0,190px) minmax(0,1fr) auto;gap:4px 16px;align-items:center;padding:11px 4px;border:0;border-top:1px solid var(--line);background:transparent;text-align:left;width:100%}
+.rec:first-child{border-top:0}
+button.rec:hover{background:var(--surface-2)}
+.rec-l{font-size:11.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700}
+.rec-w{font-weight:700;min-width:0;overflow-wrap:anywhere}
+.rec-w .sub{display:block;font-weight:400;font-size:12.5px;color:var(--muted)}
+.rec-v{font-size:15px;font-weight:600;color:var(--accent);white-space:nowrap}
+@media (max-width:560px){
+  .rec{grid-template-columns:minmax(0,1fr) auto}
+  .rec-l{grid-column:1/-1}
+  .ch-row{grid-template-columns:minmax(0,96px) minmax(0,1fr) 52px;gap:8px}
+}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 
 /** Embedded SVGs for all chess pieces */

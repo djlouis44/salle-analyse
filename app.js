@@ -3,6 +3,7 @@ import { CLS, ORDER, summarizePosition, buildAnalysis, parseInfo, estimateGameEl
   ELO_MIN_MOVES, ELO_MIN_GAMES, ELO_LAST_GAMES, ELO_GAME_ERR, ELO_AVG_ERR } from './core.js?v=3';
 import { playerGames } from './sources.js';
 import { enabled as sharing, openGroup, newCode, cleanCode } from './partage.js';
+import { weekStart, gazette, records, challenges } from './gazette.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -25,6 +26,7 @@ const S = {
   period: '30', gfilter: 'all', game: null, ply: 0, flip: false,
   depth: MOBILE ? 12 : 15, job: null, flash: null, editPlayer: null, confirm: null, engineErr: null,
   rapidOnly: true, sync: null, limit: 40, group: null, between: false, duel: null,
+  me: null, queue: null, week: 0,
 };
 
 /* ---------- Stockage ---------- */
@@ -80,7 +82,7 @@ function rememberGroup(code, name) {
 const groupName = (code) => (myGroups().find((x) => x.code === code) || {}).name || code;
 
 async function initStore() {
-  if (!sharing) { S.mode = 'local'; loadLocal(); S.players = local.players; bilans = local.bilans; rebuild(); autoSync(); return; }
+  if (!sharing) { S.mode = 'local'; loadLocal(); loadMe(); S.players = local.players; bilans = local.bilans; rebuild(); autoSync(); return; }
   let saved = null; try { saved = localStorage.getItem(GKEY); } catch (_) {}
   const code = cleanCode(new URLSearchParams(location.search).get('g')) || cleanCode(saved) || (myGroups()[0] || {}).code;
   if (code) joinGroup(code); else { S.mode = 'nogroup'; render(); }
@@ -93,9 +95,9 @@ function leaveCurrent() {
 }
 
 async function joinGroup(code, name) {
-  if (S.job) { S.flash = { t: 'err', m: 'Un bilan est en cours : attends la fin ou arrête-le avant de changer de groupe.' }; render(); return; }
+  if (S.job || S.queue) { S.flash = { t: 'err', m: 'Un bilan est en cours : attends la fin ou arrête-le avant de changer de groupe.' }; render(); return; }
   leaveCurrent();
-  S.group = code; S.mode = 'loading'; S.view = 'groupe'; loadLocal(); rebuild();
+  S.group = code; S.mode = 'loading'; S.view = 'groupe'; loadLocal(); loadMe(); rebuild();
   rememberGroup(code, name);
   try { localStorage.setItem(GKEY, code); } catch (_) {}
   history.replaceState(null, '', location.pathname + '?g=' + code);
@@ -120,7 +122,7 @@ async function joinGroup(code, name) {
 // permet d'y revenir.
 function forgetGroup(code) {
   saveGroups(myGroups().filter((x) => x.code !== code));
-  try { localStorage.removeItem('salle-analyse-v3:' + code); if (localStorage.getItem(GKEY) === code) localStorage.removeItem(GKEY); } catch (_) {}
+  try { localStorage.removeItem('salle-analyse-v3:' + code); localStorage.removeItem(MEKEY + code); if (localStorage.getItem(GKEY) === code) localStorage.removeItem(GKEY); } catch (_) {}
   const next = myGroups()[0];
   if (next) joinGroup(next.code);
   else { leaveCurrent(); S.group = null; S.mode = 'nogroup'; history.replaceState(null, '', location.pathname); render(); }
@@ -275,10 +277,14 @@ function sideName(g, side) {
 // positions) : 0,3 s par position à 12, 1,3 s à 15, 2,1 s à 16, 3,7 s à 17, de 3 à 8 s à 19.
 // Chaque cran de profondeur coûte environ ×1,65.
 const DEPTHS = [[12, 'Rapide'], [15, 'Normal'], [17, 'Précis']];
-function duration(positions, depth) {
-  const s = Math.max(10, Math.round(positions * 0.3 * 1.65 ** (depth - 12)));
-  return s < 90 ? s + ' s' : Math.round(s / 60) + ' min';
+const secs = (positions, depth) => Math.max(10, Math.round(positions * 0.3 * 1.65 ** (depth - 12)));
+function fmtSecs(s) {
+  if (s < 90) return s + ' s';
+  if (s < 5400) return Math.round(s / 60) + ' min';
+  const h = Math.floor(s / 3600); const m = Math.round((s % 3600) / 60);
+  return h + ' h' + (m ? ' ' + String(m).padStart(2, '0') : '');
 }
+const duration = (positions, depth) => fmtSecs(secs(positions, depth));
 const engine = {
   w: null, ready: null, q: Promise.resolve(),
   init() {
@@ -346,11 +352,85 @@ function updateProgress() {
   if (tx) tx.textContent = j.phase === 'load' ? 'Chargement du moteur (7 Mo, une seule fois)…' : 'Position ' + j.done + ' sur ' + j.total;
 }
 
+/* ---------- File d'analyse : tous les bilans de « moi », l'un après l'autre ---------- */
+// Chaque appareil sait quel joueur du groupe il est, et ne lance que les bilans de ses parties :
+// deux appareils ne calculent jamais la même partie.
+const MEKEY = 'salle-analyse-moi:';
+function loadMe() { try { S.me = localStorage.getItem(MEKEY + (S.group || 'local')) || null; } catch (_) { S.me = null; } }
+function setMe(id) {
+  S.me = id || null;
+  try { if (id) localStorage.setItem(MEKEY + (S.group || 'local'), id); else localStorage.removeItem(MEKEY + (S.group || 'local')); } catch (_) {}
+}
+const mePlayer = () => S.players.find((p) => p.id === S.me) || null;
+const playsIn = (g, p) => [g.white, g.black].some((u) => { const x = playerFor(u, g.site); return x && x.id === p.id; });
+// Mes parties sans bilan, sur la période et la cadence choisies, les plus récentes d'abord.
+function myPending() {
+  const me = mePlayer(); if (!me) return [];
+  return S.games.filter((g) => !g.analysis && !g.sample && inPeriod(g) && inCadence(g) && playsIn(g, me)).sort((a, b) => gameTime(b) - gameTime(a));
+}
+async function runQueue() {
+  if (S.queue) return;
+  const list = myPending(); if (!list.length) return;
+  const q = { total: list.length, done: 0, saved: 0, cancel: false, cur: null };
+  S.queue = q; S.flash = null; render();
+  // Sur téléphone, l'écran qui se met en veille arrête le calcul : on le garde allumé si possible.
+  let lock = null; try { lock = await navigator.wakeLock?.request('screen'); } catch (_) {}
+  for (const { id } of list) {
+    while (S.job && !q.cancel) await new Promise((r) => setTimeout(r, 500)); // un bilan lancé à la main passe d'abord
+    if (q.cancel) break;
+    const g = S.games.find((x) => x.id === id);
+    if (g && !g.analysis) {
+      q.cur = g; render();
+      await analyze(g);
+      if (S.engineErr) break;
+      if (g.analysis) q.saved++;
+    }
+    q.done++;
+  }
+  try { await lock?.release(); } catch (_) {}
+  S.queue = null;
+  S.flash = S.engineErr ? { t: 'err', m: 'Le moteur n’a pas démarré : ' + S.engineErr + '.' }
+    : { t: 'ok', m: (q.saved ? q.saved + ' bilan' + (q.saved > 1 ? 's enregistrés' : ' enregistré') : 'Aucun bilan enregistré') + (q.cancel ? ' : file arrêtée.' : '.') };
+  render();
+}
+
+// Panneau de la file, sur les pages Groupe et Parties. unanalyzed : parties sans bilan du groupe entier.
+function queuePanel(unanalyzed) {
+  const q = S.queue;
+  if (q) {
+    const g = q.cur;
+    return `<div class="panel stack">
+      <div class="row" style="justify-content:space-between"><div><div class="eyebrow">File d’analyse</div><h2 class="h2" style="margin-top:4px">Bilan ${Math.min(q.done + 1, q.total)} sur ${q.total}</h2></div><button class="btn ghost" data-act="qstop">Arrêter</button></div>
+      ${g ? `<div class="small">${esc(sideName(g, 'w').name)} contre ${esc(sideName(g, 'b').name)}${g.date ? ' · ' + fmtDate(g.date) : ''}</div>` : ''}
+      <div class="prog"><i id="prog"></i></div><span class="small muted" id="progtx"></span>
+      <p class="muted small" style="margin:0">Le calcul tourne sur ton appareil : garde la page ouverte. Chaque bilan est enregistré dès qu’il est fini, tu peux arrêter quand tu veux.</p></div>`;
+  }
+  if (!S.players.length) return '';
+  const me = mePlayer(); const pend = me ? myPending() : [];
+  const others = unanalyzed != null ? unanalyzed - pend.length : 0;
+  const sel = `<label class="f" style="flex:0 1 180px">Je suis<select id="mesel"><option value="">Choisir…</option>${S.players.slice().sort((a, b) => a.name.localeCompare(b.name)).map((p) => `<option value="${esc(p.id)}" ${p.id === S.me ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>`;
+  const othersTxt = others > 0 ? ` ${others} partie${others > 1 ? 's' : ''} des autres attend${others > 1 ? 'ent' : ''} aussi : c’est à eux de lancer les leurs.` : '';
+  if (!me) {
+    return `<div class="panel stack"><div class="row" style="justify-content:space-between;align-items:flex-end"><div><div class="eyebrow">File d’analyse</div><h2 class="h2" style="margin-top:4px">Tous tes bilans d’un coup</h2></div>${sel}</div>
+      <p class="muted small" style="margin:0">Dis qui tu es : l’appli fera le bilan de chacune de tes parties qui n’en a pas, l’une après l’autre. Chacun ne lance que les siennes, personne ne calcule deux fois la même partie.${unanalyzed ? ` ${unanalyzed} partie${unanalyzed > 1 ? 's' : ''} sans bilan sur cette période.` : ''}</p></div>`;
+  }
+  if (!pend.length) {
+    return `<div class="note ok row" style="justify-content:space-between"><span>Toutes tes parties de cette période ont leur bilan.${othersTxt}</span>${sel}</div>`;
+  }
+  const total = pend.reduce((s, g) => s + secs((g.plies || 60) + 1, S.depth), 0);
+  return `<div class="panel stack">
+    <div class="row" style="justify-content:space-between;align-items:flex-end"><div><div class="eyebrow">File d’analyse</div><h2 class="h2" style="margin-top:4px">${pend.length} de tes parties sans bilan</h2></div>${sel}</div>
+    ${depthPicker()}
+    <div class="row"><button class="btn primary" data-act="queue">${pend.length > 1 ? 'Lancer les ' + pend.length + ' bilans' : 'Lancer le bilan'}</button><span class="small muted">environ ${fmtSecs(total)}${MOBILE ? ' sur ordinateur, plus sur téléphone' : ''}</span></div>
+    <p class="muted small" style="margin:0">Sur la période et la cadence choisies, les plus récentes d’abord. Le calcul tourne sur ton appareil : garde la page ouverte. Chaque bilan est enregistré dès qu’il est fini.${othersTxt}</p></div>`;
+}
+
 /* ---------- Statistiques du groupe ---------- */
+// Date de fin d'une partie en ms. Les parties collées à la main n'ont que leur jour : midi.
+function gameTime(g) { return g.end || (g.date ? new Date(g.date + 'T12:00:00').getTime() : new Date(g.addedAt || 0).getTime()); }
 function inPeriod(g) {
   if (S.period === 'all') return true;
-  const t = g.end || (g.date ? new Date(g.date + 'T12:00:00').getTime() : new Date(g.addedAt || 0).getTime());
-  return Date.now() - t <= +S.period * 86400000;
+  return Date.now() - gameTime(g) <= +S.period * 86400000;
 }
 // Les parties collées à la main n'ont pas de cadence connue : on les garde toujours.
 function inCadence(g) { return !S.rapidOnly || !g.timeClass || g.timeClass === 'rapid'; }
@@ -422,6 +502,7 @@ function render() {
   if (S.mode === 'nogroup') html = viewWelcome();
   else if (S.mode === 'loading') html = '<div class="panel empty"><p>Connexion au groupe…</p></div>';
   else if (S.view === 'groupe') html = viewGroup();
+  else if (S.view === 'gazette') html = viewGazette();
   else if (S.view === 'parties') html = viewGames();
   else if (S.view === 'joueurs') html = viewPlayers();
   else if (S.view === 'duel') html = viewDuel();
@@ -506,11 +587,10 @@ function viewGroup() {
       <span><div class="big">${esc(moveLabel(x.g, x.i))}</div><div class="sub">${esc(x.who)} contre ${esc(opp)}${x.g.date ? ' · ' + fmtDate(x.g.date) : ''}</div></span>
       <span class="right">${kind === 'top' ? CLS[cls].label : '−' + Math.round(x.loss) + ' %'}</span></button>`;
   };
-  const note = s.unanalyzed ? `<div class="note">${s.unanalyzed} partie${s.unanalyzed > 1 ? 's' : ''} sans bilan sur cette période : elle${s.unanalyzed > 1 ? 's ne comptent' : ' ne compte'} pas encore dans la précision. <button class="btn ghost" data-act="go" data-v="parties">Voir les parties</button></div>` : '';
   return `<div class="stack">
     <div class="row" style="justify-content:space-between"><h2 class="h2">Classement du groupe</h2>${seg}</div>
     <div class="panel">${table}</div>
-    ${note}
+    ${queuePanel(s.unanalyzed)}
     <div class="grid2">
       <div class="panel"><div class="eyebrow" style="margin-bottom:6px">Meilleurs coups</div>
         ${s.tops.length ? `<div class="hl-list">${s.tops.map((x) => item(x, 'top')).join('')}</div>` : '<p class="muted small">Pas encore de coup brillant ou excellent sur cette période.</p>'}</div>
@@ -629,6 +709,101 @@ function viewDuel() {
     </div>`;
 }
 
+/* ---------- Gazette du club : la semaine, les défis, les records ---------- */
+// Une entrée par partie et par joueur du groupe qui l'a jouée (format décrit dans gazette.js).
+function clubEntries() {
+  const out = [];
+  for (const g of S.games) {
+    if (g.sample) continue;
+    const duel = !!duelSides(g);
+    for (const side of ['w', 'b']) {
+      const p = playerFor(side === 'w' ? g.white : g.black, g.site); if (!p) continue;
+      out.push({ g, side, p, o: outcome(g, side), t: gameTime(g), duel });
+    }
+  }
+  return out;
+}
+const dayFmt = (t) => new Date(t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
+const oppName = (e) => sideName(e.g, e.side === 'w' ? 'b' : 'w').name;
+const siteLabel = (s) => (s === 'lichess' ? 'Lichess' : 'chess.com');
+const TC_FR = { rapid: 'rapide', blitz: 'blitz', bullet: 'bullet', classical: 'classique', daily: 'par jour' };
+const plural = (n, one, many) => n + ' ' + (n > 1 ? many : one);
+function gzCard(kind, title, sub, g, ply, label) {
+  return `<div class="gz-card"><div class="eyebrow">${kind}</div><div class="gz-t">${title}</div><div class="gz-s">${sub}</div>
+    ${g ? `<button class="btn ghost gz-open" data-act="open" data-id="${esc(g.id)}" data-ply="${ply || 0}">${label || 'Voir la partie'} ›</button>` : ''}</div>`;
+}
+
+function viewGazette() {
+  if (!S.players.length) {
+    return `<div class="panel empty"><div class="eyebrow">La Gazette du club</div><h2>Pas encore de nouvelles</h2>
+      <p>Ajoutez les joueurs du groupe : la Gazette se remplit toute seule avec vos parties de la semaine.</p>
+      <button class="btn primary" data-act="go" data-v="joueurs">Ajouter un joueur</button></div>`;
+  }
+  const from = weekStart(S.week); const to = weekStart(S.week + 1);
+  const all = clubEntries(); const es = all.filter((e) => inCadence(e.g));
+  const z = gazette(es, from, to);
+  const when = S.week === 0 ? 'Cette semaine' : S.week === -1 ? 'La semaine dernière' : 'Il y a ' + -S.week + ' semaines';
+  const head = `<div class="row" style="justify-content:space-between;align-items:flex-end">
+    <div><div class="eyebrow">La Gazette du club</div><h2 class="h2" style="margin-top:4px">Semaine du ${dayFmt(from)} au ${dayFmt(to - 1)}</h2></div>
+    <div class="row"><div class="row wk"><button class="btn ghost" data-act="week" data-v="-1" aria-label="Semaine précédente">‹</button><span class="small">${when}</span><button class="btn ghost" data-act="week" data-v="1" aria-label="Semaine suivante" ${S.week >= 0 ? 'disabled' : ''}>›</button></div>${cadenceSeg()}</div></div>`;
+
+  const cards = [];
+  const b = z.players[0];
+  if (b) cards.push(gzCard('Le plus acharné', esc(b.p.name), `${plural(b.n, 'partie', 'parties')} · ${b.w} V · ${b.d} N · ${b.l} D`));
+  if (z.bestAcc) { const e = z.bestAcc; cards.push(gzCard('Meilleure précision', `${esc(e.p.name)} <span class="mono">${e.g.analysis.acc[e.side]} %</span>`, `contre ${esc(oppName(e))}${e.g.date ? ' · ' + fmtDate(e.g.date) : ''}`, e.g, 0)); }
+  if (z.topMove) { const m = z.topMove; cards.push(gzCard('Le coup de la semaine', `<span class="b b-${m.c}">${CLS[m.c].sym}</span> <span class="mono">${esc(moveLabel(m.e.g, m.i))}</span>`, `${esc(m.e.p.name)} contre ${esc(oppName(m.e))} · ${CLS[m.c].label.toLowerCase()}`, m.e.g, m.i + 1, 'Voir le coup')); }
+  if (z.blunder) { const m = z.blunder; cards.push(gzCard('La gaffe de la semaine', `<span class="b b-blunder">??</span> <span class="mono">${esc(moveLabel(m.e.g, m.i))}</span>`, `${esc(m.e.p.name)} contre ${esc(oppName(m.e))} · −${Math.round(m.l)} % de chances de gain`, m.e.g, m.i + 1, 'Voir le coup')); }
+  if (z.comeback) { const { e, s } = z.comeback; cards.push(gzCard('La remontée', esc(e.p.name), `bat ${esc(oppName(e))} après être tombé à ${Math.round(s.lo)} % de chances de gain`, e.g, 0)); }
+  if (z.collapse) { const { e, s } = z.collapse; cards.push(gzCard('Le craquage', esc(e.p.name), `était à ${Math.round(s.hi)} % de chances de gain contre ${esc(oppName(e))}, et ${e.o === 'd' ? 'finit sur une nulle' : 'finit par perdre'}`, e.g, 0)); }
+  if (z.climber) { const s = z.climber; cards.push(gzCard('En forme', `${esc(s.p.name)} <span class="mono">+${s.elo.diff}</span>`, `Elo ${TC_FR[s.elo.timeClass] || s.elo.timeClass} sur ${siteLabel(s.elo.site)}, en ${plural(s.elo.n, 'partie', 'parties')}`)); }
+  if (z.duels.length) {
+    const line = (g) => { const d = duelSides(g); const o = outcome(g, 'w');
+      const txt = o === 'd' ? `${esc(d.w.name)} et ${esc(d.b.name)} font nulle` : o ? `${esc((o === 'w' ? d.w : d.b).name)} bat ${esc((o === 'w' ? d.b : d.w).name)}` : `${esc(d.w.name)} contre ${esc(d.b.name)}`;
+      return `<button class="gz-duel" data-act="open" data-id="${esc(g.id)}" data-ply="0">${txt}<span class="muted">${g.date ? fmtDate(g.date) : ''}</span></button>`; };
+    cards.push(`<div class="gz-card"><div class="eyebrow">Entre nous</div><div class="gz-t">${plural(z.duels.length, 'duel', 'duels')}</div>
+      <div class="gz-duels">${z.duels.slice(0, 5).map(line).join('')}</div>${z.duels.length > 5 ? `<div class="gz-s">et ${z.duels.length - 5} autre${z.duels.length > 6 ? 's' : ''}</div>` : ''}</div>`);
+  }
+  const body = cards.length ? `<div class="gz-grid">${cards.join('')}</div>`
+    : `<div class="panel empty"><p>Aucune partie du groupe ${S.week === 0 ? 'cette semaine pour l’instant' : 'cette semaine-là'}${S.rapidOnly ? ' en rapide' : ''}.</p></div>`;
+  const note = z.games > z.analysed ? `<p class="muted small" style="margin:0">${z.analysed ? `${z.analysed} partie${z.analysed > 1 ? 's' : ''} sur ${z.games} ${z.analysed > 1 ? 'ont leur' : 'a son'} bilan` : `Aucune des ${z.games} parties n’a encore de bilan`} : la précision, les coups, les gaffes, les remontées et les craquages ne viennent que de celles-là. La file d’analyse (onglet Groupe) lance les tiens d’un coup.</p>` : '';
+  return `<div class="stack">${head}${body}${note}${challengesPanel(all, from, to)}${recordsPanel(es)}</div>`;
+}
+
+function challengesPanel(all, from, to) {
+  const list = challenges(all, S.players, from, to);
+  const items = list.map((c) => `<div class="ch">
+      <div class="ch-head"><div><div class="ch-t">${esc(c.title)}</div><div class="small muted">${esc(c.text)}</div></div>${c.bilan ? '<span class="chip">bilan nécessaire</span>' : ''}</div>
+      ${c.rows.map((r) => `<div class="ch-row${r.done ? ' done' : ''}"><span class="nm">${esc(r.p.name)}</span><span class="prog"><i style="width:${(100 * r.n) / c.target}%"></i></span><span class="mono small">${r.done ? '✓ fait' : r.n + ' / ' + c.target}</span></div>`).join('')}
+    </div>`).join('');
+  const won = S.players.filter((p) => list.every((c) => c.rows.find((r) => r.p.id === p.id).done));
+  return `<div class="panel stack">
+    <div><div class="eyebrow">Défis de la semaine</div><h2 class="h2" style="margin-top:4px">${won.length ? esc(won.map((p) => p.name).join(', ')) + (won.length > 1 ? ' ont' : ' a') + ' tout réussi' : 'Trois défis pour tout le monde'}</h2></div>
+    ${items}
+    <p class="muted small" style="margin:0">Tirés au sort chaque lundi, les mêmes pour tout le groupe, comptés tout seuls sur les parties rapides de la semaine. Ceux qui demandent un bilan ne voient que les parties analysées.</p></div>`;
+}
+
+function recordsPanel(es) {
+  const r = records(es); const rows = [];
+  const row = (label, who, val, g, ply) => {
+    const inner = `<span class="rec-l">${label}</span><span class="rec-w">${who}</span><span class="rec-v mono">${val}</span>`;
+    return g ? `<button class="rec" data-act="open" data-id="${esc(g.id)}" data-ply="${ply || 0}">${inner}</button>` : `<div class="rec">${inner}</div>`;
+  };
+  const sub = (s) => `<span class="sub">${s}</span>`;
+  const vs = (e) => sub(`contre ${esc(oppName(e))}${e.g.date ? ', ' + fmtDate(e.g.date) : ''}`);
+  if (r.bestAcc) { const e = r.bestAcc; rows.push(row('Meilleure précision', esc(e.p.name) + vs(e), e.g.analysis.acc[e.side] + ' %', e.g)); }
+  if (r.streak) { const s = r.streak; rows.push(row('Plus longue série', esc(s.p.name) + sub(`du ${dayFmt(s.first.t)} au ${dayFmt(s.last.t)}`), s.n + ' victoires')); }
+  if (r.comeback && r.comeback.s.lo < 50) { const { e, s } = r.comeback; rows.push(row('Plus belle remontée', esc(e.p.name) + vs(e), 'gagnée à ' + Math.round(s.lo) + ' %', e.g)); }
+  if (r.quickWin) { const e = r.quickWin; rows.push(row('Victoire éclair', esc(e.p.name) + vs(e), plural(Math.ceil(e.g.plies / 2), 'coup', 'coups'), e.g)); }
+  if (r.marathon) { const g = r.marathon.g; rows.push(row('Le marathon', `${esc(sideName(g, 'w').name)} contre ${esc(sideName(g, 'b').name)}${g.date ? sub(fmtDate(g.date)) : ''}`, Math.ceil(g.plies / 2) + ' coups', g)); }
+  if (r.busyDay) { const d = r.busyDay; rows.push(row('Journée la plus chargée', esc(d.p.name) + sub(new Date(d.t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' })), d.n + ' parties')); }
+  for (const { e, elo } of r.peaks) rows.push(row(`Elo record, rapide ${siteLabel(e.g.site)}`, esc(e.p.name) + sub(e.g.date ? fmtDate(e.g.date) : ''), String(elo), e.g));
+  if (r.blunder) { const m = r.blunder; rows.push(row('Pire gaffe', esc(m.e.p.name) + sub(`${esc(moveLabel(m.e.g, m.i))} contre ${esc(oppName(m.e))}`), '−' + Math.round(m.l) + ' %', m.e.g, m.i + 1)); }
+  return `<div class="panel stack">
+    <div><div class="eyebrow">Records du club</div><h2 class="h2" style="margin-top:4px">Depuis le début</h2></div>
+    ${rows.length ? `<div class="recs">${rows.join('')}</div>` : '<p class="muted small" style="margin:0">Pas encore assez de parties pour un record.</p>'}
+    <p class="muted small" style="margin:0">Sur toutes les parties connues de l’appli${S.rapidOnly ? ' en rapide' : ''} : les ${IMPORT_MONTHS} derniers mois récupérés sur cet appareil, plus tous les bilans et duels du groupe. Précision, remontée et gaffe : parties avec bilan seulement.</p></div>`;
+}
+
 function viewGames() {
   const opts = ['<option value="all">Tous les joueurs</option>', ...S.players.map((p) => `<option value="${esc(p.id)}" ${S.gfilter === p.id ? 'selected' : ''}>${esc(p.name)}</option>`)].join('');
   let games = S.games.filter((g) => inCadence(g) && inPeriod(g));
@@ -667,6 +842,7 @@ function viewGames() {
         </div>
       </details>
     </div>
+    ${queuePanel()}
     <div class="panel">
       <div class="row" style="justify-content:space-between;margin-bottom:6px"><h2 class="h2">Parties du groupe</h2>
         <div class="row">${betweenSeg()}${cadenceSeg()}${periodSeg()}<label class="f" style="flex:0 1 200px"><select id="gfilter" aria-label="Filtrer par joueur">${opts}</select></label></div></div>
@@ -678,7 +854,7 @@ function viewPlayers() {
   const e = S.editPlayer || {};
   const list = S.players.length ? S.players.slice().sort((a, b) => a.name.localeCompare(b.name)).map((p) => {
     const conf = S.confirm === 'p:' + p.id;
-    return `<div class="game"><div style="min-width:0"><div class="vs">${esc(p.name)}</div>
+    return `<div class="game"><div style="min-width:0"><div class="vs">${esc(p.name)}${p.id === S.me ? ' <span class="chip duel">toi</span>' : ''}</div>
       <div class="meta">${esc([p.chesscom && 'chess.com : ' + p.chesscom, p.lichess && 'Lichess : ' + p.lichess].filter(Boolean).join(' · ') || 'Aucun pseudo')}</div></div>
       <div class="row">${challengeBtn(p, 'Défier')}<button class="btn" data-act="editp" data-id="${esc(p.id)}">Modifier</button>
       ${conf ? `<button class="btn danger" data-act="delp" data-id="${esc(p.id)}">Confirmer</button><button class="btn ghost" data-act="unconfirm">Annuler</button>` : `<button class="btn ghost" data-act="confirm" data-v="p:${esc(p.id)}">Retirer</button>`}</div></div>`;
@@ -922,14 +1098,18 @@ document.addEventListener('click', async (ev) => {
   else if (act === 'flip') { S.flip = !S.flip; render(); }
   else if (act === 'depth') { S.depth = +v; render(); }
   else if (act === 'analyze') { if (S.game) analyze(S.game); }
-  else if (act === 'cancel') { if (S.job) S.job.cancel = true; }
+  else if (act === 'cancel') { if (S.job) S.job.cancel = true; if (S.queue) S.queue.cancel = true; }
+  else if (act === 'queue') runQueue();
+  else if (act === 'qstop') { if (S.queue) S.queue.cancel = true; if (S.job) S.job.cancel = true; }
+  else if (act === 'week') { S.week = Math.min(0, S.week + +v); render(); }
 });
 document.addEventListener('change', (ev) => {
   if (ev.target.id === 'gfilter') { S.gfilter = ev.target.value; S.limit = 40; render(); }
+  else if (ev.target.id === 'mesel') { setMe(ev.target.value); render(); }
   else if (ev.target.id === 'gsel') {
     const v = ev.target.value;
     if (v !== '__new') { S.flash = null; joinGroup(v); return; }
-    if (S.job) { S.flash = { t: 'err', m: 'Un bilan est en cours : attends la fin ou arrête-le avant de changer de groupe.' }; render(); return; }
+    if (S.job || S.queue) { S.flash = { t: 'err', m: 'Un bilan est en cours : attends la fin ou arrête-le avant de changer de groupe.' }; render(); return; }
     leaveCurrent(); S.group = null; S.mode = 'nogroup'; S.flash = null; history.replaceState(null, '', location.pathname); render();
   }
 });
