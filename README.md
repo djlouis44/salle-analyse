@@ -17,6 +17,12 @@ partagés.
 - Gazette du club (onglet Gazette) : la semaine du groupe (le plus acharné, meilleure précision,
   coup et gaffe de la semaine, remontée, craquage, progression Elo, duels), 3 défis tirés au sort
   chaque lundi et comptés tout seuls, et les records du club. Calculs dans `gazette.js`.
+- Appli installable (PWA) : `manifest.json`, icônes dans `icones/`, service worker `sw.js`
+  (réseau d'abord pour le site, cache d'abord pour le moteur, le SDK Firebase et les polices).
+  Le lien web marche pareil, et l'appli s'ouvre hors ligne avec les dernières données vues.
+  Sur iPhone, l'appli installée ne partage pas la mémoire de Safari : on y colle le lien du
+  groupe à la première ouverture (le champ accepte le lien entier). Changer `CACHE` dans
+  `sw.js` vide les anciens caches.
 
 ## Elo estimé
 

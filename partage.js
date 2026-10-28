@@ -20,8 +20,12 @@ export function newCode() {
   return s.slice(0, 5) + '-' + s.slice(5);
 }
 
+// Accepte le code seul (avec ou sans tiret) ou le lien entier envoyé par les amis : sur iPhone,
+// l'appli installée ne partage pas la mémoire de Safari, on y colle donc souvent le lien.
 export function cleanCode(s) {
-  const c = String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const t = String(s || '');
+  const inLink = /[?&]g=([^&#\s]+)/.exec(t);
+  const c = (inLink ? inLink[1] : t).toUpperCase().replace(/[^A-Z0-9]/g, '');
   const code = c.slice(0, 5) + '-' + c.slice(5, 10);
   return CODE_RE.test(code) ? code : null;
 }

@@ -540,7 +540,7 @@ function viewWelcome() {
   return `${mine}<div class="grid2">
     <div class="panel stack">
       <div><div class="eyebrow">Tu as reçu un code</div><h2 class="h2" style="margin-top:4px">Rejoindre un groupe</h2></div>
-      <label class="f">Code du groupe<input type="text" id="gcode" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="K7Q2X-M9PTA"></label>
+      <label class="f">Code ou lien du groupe<input type="text" id="gcode" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="K7Q2X-M9PTA"></label>
       <div><button class="btn primary" data-act="joingroup">Rejoindre</button></div>
       <p class="muted small" style="margin:0">Le plus simple : ouvre le lien que tes amis t’ont envoyé, le code est dedans.</p>
     </div>
@@ -880,6 +880,7 @@ function viewPlayers() {
           ? `<button class="btn danger" data-act="leave">Confirmer : retirer ce groupe de cet appareil</button><button class="btn ghost" data-act="unconfirm">Annuler</button>`
           : `<button class="btn ghost" data-act="confirm" data-v="leave">Quitter ce groupe sur cet appareil</button>`}</div>
         <p class="muted small" style="margin:0">Quitter ne supprime rien pour les autres : le lien permet d’y revenir.</p>` : ''}
+      ${installPanel()}
     </div></div>`;
 }
 
@@ -1089,7 +1090,8 @@ document.addEventListener('click', async (ev) => {
     try { await remote.setName(n); rememberGroup(S.group, n); S.flash = { t: 'ok', m: 'Groupe renommé : ' + n + '.' }; } catch (e) { writeErr(e); return; }
     render();
   }
-  else if (act === 'joingroup') { const c = cleanCode(($('#gcode') || {}).value); if (c) { S.flash = null; joinGroup(c); } else { S.flash = { t: 'err', m: 'Code invalide : il ressemble à K7Q2X-M9PTA.' }; render(); } }
+  else if (act === 'joingroup') { const c = cleanCode(($('#gcode') || {}).value); if (c) { S.flash = null; joinGroup(c); } else { S.flash = { t: 'err', m: 'Code invalide : il ressemble à K7Q2X-M9PTA (tu peux aussi coller le lien entier).' }; render(); } }
+  else if (act === 'install') installApp();
   else if (act === 'copylink') copyLink();
   else if (act === 'editp') { S.editPlayer = S.players.find((p) => p.id === t.dataset.id) || null; render(); }
   else if (act === 'canceledit') { S.editPlayer = null; render(); }
@@ -1140,6 +1142,34 @@ document.addEventListener('keydown', (ev) => {
 let tx0 = null;
 document.addEventListener('touchstart', (e) => { if (e.target.closest('#board')) tx0 = e.touches[0].clientX; }, { passive: true });
 document.addEventListener('touchend', (e) => { if (tx0 == null) return; const dx = e.changedTouches[0].clientX - tx0; tx0 = null; if (Math.abs(dx) > 40) step(dx < 0 ? 1 : -1); }, { passive: true });
+
+/* ---------- Appli installable (PWA) ---------- */
+// Le service worker garde l'appli utilisable hors ligne. Chrome et Edge proposent ensuite
+// l'installation : on garde leur invitation pour l'ouvrir depuis notre bouton.
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+let installPrompt = null;
+addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; render(); });
+addEventListener('appinstalled', () => { installPrompt = null; S.flash = { t: 'ok', m: 'Appli installée : tu la trouves sur ton écran d’accueil.' }; render(); });
+const INSTALLED = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+async function installApp() {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  try { await installPrompt.userChoice; } catch (_) {}
+  installPrompt = null; render();
+}
+function installPanel() {
+  if (INSTALLED) return '';
+  const how = installPrompt
+    ? `<div><button class="btn primary" data-act="install">Installer l’appli</button></div>`
+    : IOS
+      ? `<p class="small" style="margin:0">Dans <strong>Safari</strong> : bouton <strong>Partager</strong> (le carré avec une flèche), puis <strong>Sur l’écran d’accueil</strong>.</p>
+         <p class="muted small" style="margin:0">Sur iPhone, l’appli installée ne partage pas la mémoire de Safari : à la première ouverture, colle le lien du groupe (copie-le ci-dessus avant).</p>`
+      : `<p class="small" style="margin:0">Sur Android, dans Chrome : menu <strong>⋮</strong>, puis <strong>Installer l’application</strong> (ou « Ajouter à l’écran d’accueil »). Sur iPhone : Safari, <strong>Partager</strong>, puis <strong>Sur l’écran d’accueil</strong>.</p>`;
+  return `<div class="panel stack"><div class="eyebrow">Sur ton téléphone</div>
+    <h2 class="h2" style="margin-top:-8px">Installer l’appli</h2>
+    <p class="muted small" style="margin:0">Une icône sur l’écran d’accueil, en plein écran, sans barre de navigateur. Le lien web continue de marcher pareil.</p>${how}</div>`;
+}
 
 render();
 initStore();
