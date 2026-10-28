@@ -12,6 +12,7 @@ const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // sans I, O, 0, 1 : rien à c
 const CODE_RE = /^[A-Z2-9]{5}-[A-Z2-9]{5}$/;
 
 export const enabled = !!firebaseConfig.projectId;
+export const appCheck = enabled && !!firebaseConfig.appCheckKey;
 
 // 10 caractères tirés au hasard : environ 10^15 codes possibles, impossible à deviner.
 export function newCode() {
@@ -36,20 +37,33 @@ async function init() {
   if (db) return;
   const [{ initializeApp }, f] = await Promise.all([import(SDK + 'firebase-app.js'), import(SDK + 'firebase-firestore.js')]);
   fs = f;
+  const app = initializeApp(firebaseConfig);
+  // App Check : Firestore n'accepte que les requêtes venues de ce site (jeton reCAPTCHA v3), ce qui
+  // empêche un script extérieur de vider le quota avec la clé publique. Sans clé, rien ne change.
+  // Le blocage lui-même s'active dans la console Firebase (App Check > Cloud Firestore > Appliquer).
+  if (firebaseConfig.appCheckKey) {
+    try {
+      const ac = await import(SDK + 'firebase-app-check.js');
+      ac.initializeAppCheck(app, { provider: new ac.ReCaptchaV3Provider(firebaseConfig.appCheckKey), isTokenAutoRefreshEnabled: true });
+    } catch (_) { /* hors ligne : Firestore lit son cache local */ }
+  }
   // Cache local : l'appli s'affiche tout de suite au rechargement, même hors ligne.
-  db = fs.initializeFirestore(initializeApp(firebaseConfig), { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) });
+  db = fs.initializeFirestore(app, { localCache: fs.persistentLocalCache({ tabManager: fs.persistentMultipleTabManager() }) });
 }
 
 // Ouvre un groupe et écoute les changements en direct. Renvoie les fonctions d'écriture,
 // et close() pour arrêter l'écoute quand on passe à un autre groupe.
-export async function openGroup(code, { onInfo, onPlayers, onBilans, onDuels, onError }) {
+// since (ms) : ne lire que les bilans des parties finies depuis cette date. Chaque ouverture
+// relit les bilans écoutés : sans limite, le quota gratuit fondrait à mesure qu'ils s'accumulent.
+export async function openGroup(code, { onInfo, onPlayers, onBilans, onDuels, onError }, { since = 0 } = {}) {
   await init();
   const base = 'groupes/' + code + '/';
+  const bilansQ = since ? fs.query(fs.collection(db, base + 'bilans'), fs.where('end', '>=', since)) : fs.collection(db, base + 'bilans');
   const unsubs = [
     // Le nom est facultatif : une erreur ici (règles pas encore à jour) ne bloque rien.
     fs.onSnapshot(fs.doc(db, 'groupes', code), (d) => onInfo(d.exists() ? d.data() : {}), () => onInfo({})),
     fs.onSnapshot(fs.collection(db, base + 'joueurs'), (s) => onPlayers(s.docs.map((d) => ({ ...d.data(), id: d.id }))), onError),
-    fs.onSnapshot(fs.collection(db, base + 'bilans'), (s) => onBilans(s.docs.map((d) => ({ ...d.data(), id: d.id }))), onError),
+    fs.onSnapshot(bilansQ, (s) => onBilans(s.docs.map((d) => ({ ...d.data(), id: d.id }))), onError),
     // Comme le nom : sans les nouvelles règles, pas de duels partagés, mais rien ne casse.
     fs.onSnapshot(fs.collection(db, base + 'duels'), (s) => onDuels(s.docs.map((d) => ({ ...d.data(), id: d.id }))), () => onDuels([])),
   ];

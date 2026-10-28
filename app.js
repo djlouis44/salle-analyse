@@ -2,7 +2,7 @@ import { Chess } from './chess.js';
 import { CLS, ORDER, summarizePosition, buildAnalysis, parseInfo, estimateGameElo, estimatePlayerElo, eloText, loadBook, explainMove, withAccuracy,
   ELO_MIN_MOVES, ELO_MIN_GAMES, ELO_LAST_GAMES, ELO_GAME_ERR, ELO_AVG_ERR } from './core.js?v=3';
 import { playerGames } from './sources.js';
-import { enabled as sharing, openGroup, newCode, cleanCode } from './partage.js';
+import { enabled as sharing, appCheck, openGroup, newCode, cleanCode } from './partage.js?v=2';
 import { weekStart, gazette, records, challenges } from './gazette.js';
 
 const $ = (s) => document.querySelector(s);
@@ -42,7 +42,29 @@ let duels = []; // parties entre deux joueurs du groupe, gardées dans Firestore
 let remote = null; // fonctions d'écriture Firestore quand un groupe est ouvert
 
 const lkey = () => 'salle-analyse-v3:' + (S.group || 'local');
-function loadLocal() { try { local = { games: [], players: [], bilans: [], lastSync: 0, ...JSON.parse(localStorage.getItem(lkey()) || '{}') }; } catch (_) {} }
+// Durée gardée : les parties récupérées sur l'appareil, et les bilans lus dans Firestore. Au-delà,
+// la mémoire du navigateur (≈ 5 Mo pour tous les groupes) déborde et chaque ouverture relit trop
+// de bilans. Les duels, eux, restent pour toujours (collection à part, peu nombreux).
+const HISTORY_DAYS = 92;
+const historySince = () => Date.now() - HISTORY_DAYS * 86400000;
+// Les parties collées à la main (sans cadence) sont gardées : elles sont rares et voulues.
+const pruneGames = (games) => games.filter((g) => !g.timeClass || gameTime(g) >= historySince());
+function loadLocal() {
+  try { local = { games: [], players: [], bilans: [], lastSync: 0, ...JSON.parse(localStorage.getItem(lkey()) || '{}') }; } catch (_) {}
+  const n = local.games.length; local.games = pruneGames(local.games);
+  if (local.games.length < n) saveLocal();
+}
+// Au démarrage, la même chose pour les groupes de l'appareil qu'on n'ouvre pas.
+function pruneAllGroups() {
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith('salle-analyse-v3:')) continue;
+      const o = JSON.parse(localStorage.getItem(k) || '{}'); if (!Array.isArray(o.games)) continue;
+      const kept = pruneGames(o.games);
+      if (kept.length < o.games.length) { o.games = kept; localStorage.setItem(k, JSON.stringify(o)); }
+    }
+  } catch (_) {}
+}
 function saveLocal() {
   try { localStorage.setItem(lkey(), JSON.stringify(local)); }
   catch (_) { S.flash = { t: 'err', m: 'Le stockage du navigateur est plein : certaines parties ne seront pas gardées.' }; }
@@ -109,7 +131,7 @@ async function joinGroup(code, name) {
       onBilans: (bs) => { if (S.group !== code) return; bilans = bs; rebuild(); },
       onDuels: (ds) => { if (S.group !== code) return; duels = ds; rebuild(); },
       onError: (e) => { S.flash = { t: 'err', m: 'Le partage ne répond pas (' + (e && (e.code || e.message)) + '). Recharge la page.' }; render(); },
-    });
+    }, { since: historySince() });
     if (S.group !== code) { r.close(); return; }
     remote = r;
     if (name) r.setName(name).catch(() => {}); // nom choisi à la création du groupe
@@ -145,7 +167,8 @@ async function removePlayer(id) {
 // Le bilan emporte la partie avec lui : un ami qui ne l'a pas dans sa liste la voit quand même.
 async function saveBilan(g, analysis) {
   const { analysis: _old, sample: _s, ...meta } = g;
-  const b = { ...meta, analysis };
+  // end est toujours rempli : c'est sur lui que l'appli filtre les bilans récents à lire.
+  const b = { ...meta, end: meta.end || gameTime(g), analysis };
   if (remote) return remote.putBilan(b);
   upsert(local.bilans, b); bilans = local.bilans; saveLocal(); rebuild();
 }
@@ -201,13 +224,14 @@ async function syncGames(players = S.players) {
     if (S.group !== group) { S.sync = null; render(); return; } // on a changé de groupe entre-temps
     errors.forEach((e) => S.sync.errors.push(p.name + ' : ' + e.message));
     const known = new Set(local.games.map((g) => g.id));
-    const fresh = games.filter((g) => !known.has(g.id)).map(toGame).filter(Boolean);
+    const fresh = pruneGames(games.filter((g) => !known.has(g.id)).map(toGame).filter(Boolean));
     if (fresh.length) { addGames(fresh); added += fresh.length; }
     S.sync.done++; render();
   }
   const errs = S.sync.errors;
   S.sync = null;
-  local.lastSync = Date.now(); saveLocal();
+  local.games = pruneGames(local.games);
+  local.lastSync = Date.now(); saveLocal(); rebuild();
   saveDuels();
   S.flash = { t: errs.length ? 'err' : 'ok', m: (added ? added + ' nouvelle' + (added > 1 ? 's parties' : ' partie') : 'Aucune nouvelle partie') + '.' + (errs.length ? ' ' + errs.join(' · ') : '') };
   render();
@@ -524,7 +548,7 @@ async function copyLink() {
 
 // Filtres partagés entre les pages Parties et Groupe : changer l'un change les deux.
 function periodSeg() {
-  return `<div class="seg" role="group" aria-label="Période">${[['7', '7 jours'], ['30', '30 jours'], ['all', 'Depuis le début']].map(([v, l]) => `<button data-act="period" data-v="${v}" aria-pressed="${S.period === v}">${l}</button>`).join('')}</div>`;
+  return `<div class="seg" role="group" aria-label="Période">${[['7', '7 jours'], ['30', '30 jours'], ['all', '3 mois']].map(([v, l]) => `<button data-act="period" data-v="${v}" aria-pressed="${S.period === v}">${l}</button>`).join('')}</div>`;
 }
 function betweenSeg() {
   return `<div class="seg" role="group" aria-label="Adversaires">${[[false, 'Toutes'], [true, 'Entre nous']].map(([v, l]) => `<button data-act="between" data-v="${v}" aria-pressed="${S.between === v}">${l}</button>`).join('')}</div>`;
@@ -799,9 +823,9 @@ function recordsPanel(es) {
   for (const { e, elo } of r.peaks) rows.push(row(`Elo record, rapide ${siteLabel(e.g.site)}`, esc(e.p.name) + sub(e.g.date ? fmtDate(e.g.date) : ''), String(elo), e.g));
   if (r.blunder) { const m = r.blunder; rows.push(row('Pire gaffe', esc(m.e.p.name) + sub(`${esc(moveLabel(m.e.g, m.i))} contre ${esc(oppName(m.e))}`), '−' + Math.round(m.l) + ' %', m.e.g, m.i + 1)); }
   return `<div class="panel stack">
-    <div><div class="eyebrow">Records du club</div><h2 class="h2" style="margin-top:4px">Depuis le début</h2></div>
+    <div><div class="eyebrow">Records du club</div><h2 class="h2" style="margin-top:4px">Sur les 3 derniers mois</h2></div>
     ${rows.length ? `<div class="recs">${rows.join('')}</div>` : '<p class="muted small" style="margin:0">Pas encore assez de parties pour un record.</p>'}
-    <p class="muted small" style="margin:0">Sur toutes les parties connues de l’appli${S.rapidOnly ? ' en rapide' : ''} : les ${IMPORT_MONTHS} derniers mois récupérés sur cet appareil, plus tous les bilans et duels du groupe. Précision, remontée et gaffe : parties avec bilan seulement.</p></div>`;
+    <p class="muted small" style="margin:0">Sur les parties des 3 derniers mois${S.rapidOnly ? ' en rapide' : ''}, plus tous les duels entre vous. Précision, remontée et gaffe : parties avec bilan seulement.</p></div>`;
 }
 
 function viewGames() {
@@ -1171,5 +1195,8 @@ function installPanel() {
     <p class="muted small" style="margin:0">Une icône sur l’écran d’accueil, en plein écran, sans barre de navigateur. Le lien web continue de marcher pareil.</p>${how}</div>`;
 }
 
+pruneAllGroups();
+// Le badge reCAPTCHA est masqué (style.css) : Google demande alors cette mention à la place.
+if (appCheck) $('#rc').hidden = false;
 render();
 initStore();

@@ -24,6 +24,16 @@ partagés.
   groupe à la première ouverture (le champ accepte le lien entier). Changer `CACHE` dans
   `sw.js` vide les anciens caches.
 
+## Capacité et protection
+
+- **3 mois d'historique** (`HISTORY_DAYS` dans `app.js`) : les parties plus vieilles sont
+  retirées de l'appareil (la mémoire du navigateur plafonne vers 5 Mo pour tous les groupes), et
+  l'appli ne lit que les bilans de ces 3 mois (chaque ouverture relit les bilans écoutés : c'est
+  ce qui consomme le quota gratuit de 50 000 lectures par jour). Les duels restent pour toujours.
+- **App Check** : avec une clé de site reCAPTCHA v3 dans `firebase-config.js` (`appCheckKey`),
+  Firestore peut refuser les requêtes qui ne viennent pas du site. Le blocage s'active dans la
+  console Firebase (App Check > Cloud Firestore > Appliquer), une fois les requêtes vérifiées.
+
 ## Elo estimé
 
 Calé sur des parties rapides chess.com (voir `core.js` et `calibrage/`). Sur la moyenne des
