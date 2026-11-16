@@ -12,12 +12,13 @@ export const CLS = {
   excellent:  { label: 'Très bien',     sym: '✓' },
   good:       { label: 'Bon',           sym: '✓' },
   book:       { label: 'Théorique',     sym: '≡' },
+  forced:     { label: 'Forcé',         sym: '□' },
   inaccuracy: { label: 'Imprécision',   sym: '?!' },
   mistake:    { label: 'Erreur',        sym: '?' },
   miss:       { label: 'Manqué',        sym: '✗' },
   blunder:    { label: 'Gaffe',         sym: '??' },
 };
-export const ORDER = ['brilliant', 'great', 'best', 'excellent', 'good', 'book', 'inaccuracy', 'mistake', 'miss', 'blunder'];
+export const ORDER = ['brilliant', 'great', 'best', 'excellent', 'good', 'book', 'forced', 'inaccuracy', 'mistake', 'miss', 'blunder'];
 
 // Positions théoriques (base Lichess chess-openings, CC0), clé = FNV-1a des 3 premiers champs du FEN.
 // Fichier construit une fois : ouvertures.json { names, pos: { hash: index du nom } }.
@@ -80,8 +81,11 @@ export function summarizePosition(fen, res) {
     w: +(stmWhite ? stm : 100 - stm).toFixed(1),
     e, b, bs,
     gap: gap == null ? null : +gap.toFixed(1),
+    // Suite optimale (bouton « Afficher ») : les 10 premiers demi-coups de la ligne du moteur.
+    pv: l1 && l1.pv && l1.pv.length ? l1.pv.slice(0, PV_LEN).join(' ') : null,
   };
 }
+export const PV_LEN = 10;
 
 export function isSacrifice(m) {
   if (m.piece === 'p' || m.piece === 'k') return false;
@@ -146,16 +150,35 @@ export function gameAccuracy(arr) {
   return Math.round(((mean + harm) / 2) * 10) / 10;
 }
 
+// Seuils de perte de chances de gain (en points de %). Calés le 2026-11-16 sur de vrais bilans
+// chess.com relevés coup par coup (calibrage/caler-classement.mjs) : chess.com est plus large que
+// sa propre documentation (2 / 5 / 10) sur les petits écarts et plus sévère sur l'Erreur, d'où 4 / 6 / 7.
+// Sur 30 parties de 100 à 2 500 Elo : accord 57,1 → 60,7 % en profondeur 15, 53,8 → 58,9 % en 12.
+export const SEUILS = { excellent: 4, good: 6, inaccuracy: 7, mistake: 20 };
 export function classify(loss, isBest) {
   if (isBest) return 'best';
-  if (loss < 2) return 'excellent';
-  if (loss < 5) return 'good';
-  if (loss < 10) return 'inaccuracy';
-  if (loss < 20) return 'mistake';
+  if (loss < SEUILS.excellent) return 'excellent';
+  if (loss < SEUILS.good) return 'good';
+  if (loss < SEUILS.inaccuracy) return 'inaccuracy';
+  if (loss < SEUILS.mistake) return 'mistake';
   return 'blunder';
 }
 
 const BAD = ['inaccuracy', 'mistake', 'miss', 'blunder'];
+
+// Matériel que le camp au trait gagne en suivant la ligne du moteur (6 demi-coups au plus), compté
+// après chaque réponse adverse. Sert à « Manqué » : il y avait quelque chose à prendre.
+function pvGain(fen, pv) {
+  if (!fen || !pv) return 0;
+  const c = new Chess(fen); const me = c.turn(); let net = 0, best = 0;
+  for (const u of pv.split(' ').slice(0, 6)) {
+    let m = null; try { m = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] }); } catch (_) { m = null; }
+    if (!m) break;
+    if (m.captured) net += (m.color === me ? 1 : -1) * (m.captured === 'k' ? 0 : VAL[m.captured]);
+    if (m.color !== me) best = Math.max(best, net);
+  }
+  return best;
+}
 
 // Mat en n pour le camp `color`, lu dans l'évaluation enregistrée (point de vue des Blancs), sinon null.
 function mateIn(color, e) {
@@ -186,15 +209,17 @@ export function buildAnalysis(hist, pos, depth, book) {
     const loss = exact ? 0 : Math.max(0, wpB - wpA);
     // « Meilleur » seulement pour le coup du moteur, comme chess.com ; un autre coup sans perte est « Très bien ».
     let cls = classify(loss, exact);
+    // Forcé : un seul coup légal (chess.com l'affiche à part).
+    if (new Chess(m.before).moves().length === 1) cls = 'forced';
     // Théorique : tant que la partie reste dans la base d'ouvertures (un piège qui perd gros en sort).
-    if (inBook && loss < 10 && openingName(book, m.after)) cls = 'book';
+    else if (inBook && loss < 10 && openingName(book, m.after)) cls = 'book';
     else {
       inBook = false;
       if ((cls === 'best' || cls === 'excellent') && wpB < 95 && wpA >= 50 && isSacrifice(m)) cls = 'brilliant';
       else if (cls === 'best' && exact && A.gap != null && A.gap >= 15 && wpB < 95 && !isRecapture(hist, i)) cls = 'great';
-      // Manqué : l'adversaire vient de se tromper et offrait une position gagnante, on la laisse passer.
-      else if ((cls === 'mistake' || cls === 'blunder') && i > 0 && BAD.includes(ply[i - 1].c)
-        && wpB >= 70 && 100 - pos[i - 1].stm < 70 && wpA < 70) cls = 'miss';
+      // Manqué (calé le 2026-11-16) : un coup faible alors que la ligne du moteur gagnait du matériel,
+      // ou que l'adversaire venait de se tromper et laissait une position gagnante.
+      else if (BAD.includes(cls) && (pvGain(m.before, A.pv) >= 2 || (i > 0 && BAD.includes(ply[i - 1].c) && wpB >= 70))) cls = 'miss';
       // Manqué aussi : un mat forcé laissé passer (mat en 5 ou moins perdu, ou mat en 1-2 rallongé).
       else if (cls !== 'brilliant' && missedMate(m.color, A.e, B.e)) cls = 'miss';
     }
@@ -204,7 +229,7 @@ export function buildAnalysis(hist, pos, depth, book) {
     v: 2,
     depth,
     at: new Date().toISOString(),
-    pos: pos.map((x) => ({ w: x.w, e: x.e, b: x.b || null, bs: x.bs || null })),
+    pos: pos.map((x) => ({ w: x.w, e: x.e, b: x.b || null, bs: x.bs || null, p: x.pv || null })),
     ply,
   };
   out.acc = accuracyOf(out, hist.length ? hist[0].color : 'w');
@@ -214,39 +239,153 @@ export function buildAnalysis(hist, pos, depth, book) {
 // Phrase d'explication d'un coup, calculée à l'affichage (marche aussi pour les anciens bilans).
 const PIECE = { p: 'le pion', n: 'le cavalier', b: 'le fou', r: 'la tour', q: 'la dame', k: 'le roi' };
 const DU = { p: 'du pion', n: 'du cavalier', b: 'du fou', r: 'de la tour', q: 'de la dame', k: 'du roi' };
-const cap = (s) => s[0].toUpperCase() + s.slice(1);
-// Ce que l'adversaire peut faire après le coup : mat, prise, ou sa meilleure réponse.
-function replyText(m, B) {
+const NOM = { p: 'pion', n: 'cavalier', b: 'fou', r: 'tour', q: 'dame', k: 'roi' };
+const LES = { p: 'les pions', n: 'les cavaliers', b: 'les fous', r: 'les tours', q: 'les dames' };
+const FEM = { r: true, q: true };
+
+// La pièce en `sq` peut-elle être gagnée par le camp `by` ? Oui si personne ne la défend, ou si
+// une pièce moins chère l'attaque. Le roi n'est jamais « en prise ».
+function enPrise(c, sq, by) {
+  const p = c.get(sq); if (!p || p.type === 'k' || p.color === by) return false;
+  const att = c.attackers(sq, by); if (!att.length) return false;
+  if (!c.attackers(sq, p.color).length) return true;
+  return Math.min(...att.map((s) => VAL[c.get(s).type])) < VAL[p.type];
+}
+
+// Ce que fait un coup, en quelques mots au présent (« prend le fou laissé sans défense »), ou null.
+// Repris des motifs que nomme le coach de chess.com (relevé du 2026-11-16) : fourchette, pièce
+// gratuite, reprise, échange, roque, sortie d'échec, pièce mise à l'abri, pion qui chasse une
+// pièce, développement. fen = position avant le coup ; prev = coup précédent (chess.js verbeux).
+export function motif(fen, uci, prev, ply) {
+  if (!fen || !uci) return null;
+  const c = new Chess(fen); const me = c.turn(); const opp = me === 'w' ? 'b' : 'w';
+  const wasCheck = c.inCheck();
+  const fromAttacked = enPrise(c, uci.slice(0, 2), opp);
+  const target = c.get(uci.slice(2, 4));
+  const targetFree = target && target.color === opp && target.type !== 'k' && !c.attackers(uci.slice(2, 4), opp).length;
+  let m; try { m = c.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] }); } catch (_) { return null; }
+  if (!m) return null;
+  if (c.isCheckmate()) return 'donne mat';
+  // Fourchette : la pièce jouée attaque deux cibles qui valent la peine (le roi en échec, une pièce
+  // plus chère qu'elle, ou une pièce sans défenseur), sans être elle-même simplement perdue.
+  if (m.piece !== 'k') {
+    const t = [];
+    for (const row of c.board()) for (const x of row) {
+      if (!x || x.color !== opp || !c.attackers(x.square, me).includes(m.to)) continue;
+      if (x.type === 'k' || VAL[x.type] > VAL[m.piece] || (x.type !== 'p' && !c.attackers(x.square, opp).length)) t.push(x);
+    }
+    if (t.length >= 2 && (t.some((x) => x.type === 'k') || !enPrise(c, m.to, opp))) {
+      t.sort((a, b) => VAL[b.type] - VAL[a.type]);
+      const [a, b] = t;
+      return `fait une fourchette sur ${a.type === b.type ? LES[a.type] : PIECE[a.type] + ' et ' + PIECE[b.type]}`;
+    }
+  }
+  if (m.captured) {
+    const pc = m.captured;
+    if (prev && prev.captured && prev.to === m.to) return `reprend ${PIECE[pc]}`;
+    if (targetFree) return `prend ${PIECE[pc]} laissé${FEM[pc] ? 'e' : ''} sans défense`;
+    if (VAL[pc] > VAL[m.piece] + 1) return `gagne du matériel en prenant ${PIECE[pc]}`;
+    if (VAL[pc] === VAL[m.piece] || (VAL[pc] === 3 && VAL[m.piece] === 3)) return pc === m.piece ? `échange ${LES[pc]}` : `échange ${PIECE[m.piece]} contre ${PIECE[pc]}`;
+    return `prend ${PIECE[pc]}`;
+  }
+  if (m.flags.includes('k') || m.flags.includes('q')) return 'roque et met le roi à l’abri';
+  // Gain de temps : la pièce jouée attaque la dame adverse sans être elle-même perdue.
+  if (m.piece !== 'q' && !wasCheck && !enPrise(c, m.to, opp)
+    && c.board().flat().some((x) => x && x.color === opp && x.type === 'q' && c.attackers(x.square, me).includes(m.to))) return 'gagne du temps en attaquant la dame';
+  if (wasCheck) return m.piece === 'k' ? 'sort le roi de l’échec' : 'pare l’échec';
+  if (m.promotion) return `amène le pion à ${PIECE[m.promotion].replace(/^l[ea] /, '')}`;
+  if (fromAttacked && m.piece !== 'p') return `met ${PIECE[m.piece]} à l’abri`;
+  if (m.piece === 'p') {
+    const chased = c.board().flat().find((x) => x && x.color === opp && x.type !== 'p' && x.type !== 'k' && c.attackers(x.square, me).includes(m.to));
+    if (chased && !enPrise(c, m.to, opp)) return `chasse ${PIECE[chased.type]} avec un pion`;
+  }
+  if ((m.piece === 'n' || m.piece === 'b') && m.from[1] === (me === 'w' ? '1' : '8') && (ply == null || ply < 30)) return `développe ${PIECE[m.piece]}`;
+  if (c.inCheck()) return 'fait échec au roi';
+  return null;
+}
+const motifOf = (hist, i, fen, uci) => motif(fen, uci, i > 0 ? hist[i - 1] : null, i);
+
+// Matériel gagné par le camp au trait en suivant la ligne du moteur (`pv`, coups UCI séparés par
+// des espaces) : 6 demi-coups, prolongés tant que les prises s'enchaînent (pour finir les échanges).
+// Renvoie { san: 'Qh5+ g6 Qxe5+ …', net, top } ou null. top = plus grosse pièce prise à l'adversaire.
+const UNE = { p: 'un pion', n: 'un cavalier', b: 'un fou', r: 'une tour', q: 'la dame' };
+function lineGain(fen, pv) {
+  if (!fen || !pv) return null;
+  const c = new Chess(fen); const me = c.turn(); const sans = []; let net = 0; let top = null; let lastCap = false; let cut = 0;
+  for (const u of pv.split(' ').slice(0, 8)) {
+    if (sans.length >= 6 && !lastCap) break;
+    let m; try { m = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] }); } catch (_) { break; }
+    if (!m) break;
+    sans.push(m.san); lastCap = !!m.captured;
+    if (m.captured) {
+      if (m.color === me) cut = sans.length;
+      if (m.color === me) { net += VAL[m.captured]; if (!top || VAL[m.captured] > VAL[top]) top = m.captured; } else net -= VAL[m.captured];
+    }
+    if (m.promotion) { if (m.color === me) cut = sans.length; net += (m.color === me ? 1 : -1) * (VAL[m.promotion] - 1); }
+  }
+  // La ligne affichée s'arrête à la dernière prise du camp qui gagne : la suite n'apprend rien.
+  return cut ? { san: sans.slice(0, cut).join(' '), net, top } : null;
+}
+// « une tour », « la dame »… ce que la ligne gagne vraiment, au bilan des échanges (2 points au
+// moins), sinon ''. On lit le gain net, pas la plus grosse prise : dame contre tour n'est pas « la dame ».
+function gainText(g) {
+  if (!g || g.net < 2 || !g.top) return '';
+  if (g.net >= 8) return g.top === 'q' ? 'la dame' : 'beaucoup de matériel';
+  if (g.net >= 5) return g.top === 'r' ? 'une tour' : 'l’équivalent d’une tour';
+  if (g.net >= 3) return g.top === 'n' || g.top === 'b' ? UNE[g.top] : 'une pièce';
+  return 'deux pions';
+}
+
+// Ce que l'adversaire peut faire après le coup : mat, fourchette, ou la ligne du moteur qui gagne du
+// matériel. Rien si sa meilleure réponse n'explique pas la faute (on garde alors « Il fallait jouer »).
+function replyText(hist, i, B) {
+  const m = hist[i];
   if (!B) return '';
   const e = B.e || '';
   if ((e.startsWith('M') && m.color === 'b') || (e.startsWith('-M') && m.color === 'w')) return `Ça permet un mat en ${e.replace('-', '').slice(1)}.`;
   if (!B.b) return '';
   let r = null;
   try { r = new Chess(m.after).move({ from: B.b.slice(0, 2), to: B.b.slice(2, 4), promotion: B.b[4] }); } catch (_) { return ''; }
-  // Une reprise après un échange égal n'est pas une pièce perdue.
-  const trade = r.to === m.to && m.captured && VAL[m.captured] >= VAL[r.captured];
-  if (r.captured && !trade) return `${cap(PIECE[r.captured])} en ${r.to} tombe après ${r.san}.`;
-  return `La bonne réponse adverse : ${r.san}.`;
+  if (!r) return '';
+  const d = motif(m.after, B.b, m, i + 1);
+  if (d && d.startsWith('fait une fourchette')) return `L’adversaire répond ${r.san}, qui ${d}.`;
+  const lg = lineGain(m.after, B.p); const g = gainText(lg);
+  if (g) return `Après ${lg.san}, l’adversaire gagne ${g}.`;
+  if (d && /^(prend|gagne)/.test(d)) return `L’adversaire répond ${r.san}, qui ${d}.`;
+  return '';
 }
 export function explainMove(hist, a, i, book) {
   const m = hist[i]; const cls = a.ply[i].c; const A = a.pos[i]; const B = a.pos[i + 1];
   const best = A && A.bs && A.bs !== m.san ? A.bs : null;
   if (m.san.endsWith('#')) return 'Échec et mat.';
+  const d = motifOf(hist, i, m.before, m.lan);
+  let bd = best ? motifOf(hist, i, m.before, A.b) : null;
+  if (bd && bd === d) bd = null; // « il sort le roi de l'échec, mais Rh7 sortait aussi le roi… » n'apprend rien
   switch (cls) {
     case 'book': { const n = openingName(book, m.after); return n ? `Coup connu de la théorie (${n}).` : 'Coup connu de la théorie des ouvertures.'; }
+    case 'forced': return 'C’était le seul coup légal.';
     case 'brilliant': return `Sacrifice ${DU[m.promotion || m.piece]} qui tient la route : le moteur le valide.`;
-    case 'great': return 'Le seul bon coup de la position : les autres laissaient filer l’avantage.';
-    case 'best': return 'C’est le coup que le moteur aurait joué.';
-    case 'excellent': return `Presque aussi fort que le meilleur coup${best ? ` (${best})` : ''}.`;
-    case 'good': return best ? `Correct, mais ${best} était plus précis.` : 'Un coup correct.';
+    case 'great': return `Le seul bon coup de la position${d ? ` : il ${d}` : ', les autres laissaient filer l’avantage'}.`;
+    case 'best': return d ? `Le coup du moteur : il ${d}.` : 'C’est le coup que le moteur aurait joué.';
+    case 'excellent': return d ? `Ce coup ${d}, presque aussi fort que ${best || 'le meilleur coup'}.` : `Presque aussi fort que le meilleur coup${best ? ` (${best})` : ''}.`;
+    case 'good': {
+      const alt = best ? `${best} était plus précis${bd ? ` : il ${bd}` : ''}` : '';
+      if (d) return `Ce coup ${d}${alt ? `, mais ${alt}` : ''}.`;
+      return alt ? `Correct, mais ${alt}.` : 'Un coup correct.';
+    }
     case 'miss': {
       const n = mateIn(m.color, A && A.e);
       if (n) return `Occasion manquée : il y avait un mat en ${n}${best ? `, à commencer par ${best}` : ''}.`;
+      const lg = lineGain(m.before, A && A.p); const g = gainText(lg);
+      if (best && g) return `Occasion manquée : ${lg.san} gagnait ${g}.`;
+      if (best && bd) return `Occasion manquée : ${best} ${bd} et donnait une position gagnante.`;
       return `Occasion manquée : après l’erreur adverse, ${best || 'un autre coup'} donnait une position gagnante.`;
     }
     default: {
       const head = { inaccuracy: 'Il y avait plus précis.', mistake: 'Ce coup coûte cher.', blunder: 'Grosse faute.' }[cls] || '';
-      return [head, replyText(m, B), best ? `Il fallait jouer ${best}.` : ''].filter(Boolean).join(' ');
+      // Une imprécision ne perd rien de concret : on donne seulement le meilleur coup.
+      const why = cls === 'inaccuracy' ? '' : replyText(hist, i, B);
+      return [head, why, best ? `Il fallait jouer ${best}${bd ? `, qui ${bd}` : ''}.` : ''].filter(Boolean).join(' ');
     }
   }
 }

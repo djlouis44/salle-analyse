@@ -1,6 +1,6 @@
 import { Chess } from './chess.js';
 import { CLS, ORDER, summarizePosition, buildAnalysis, parseInfo, estimateGameElo, estimatePlayerElo, eloText, loadBook, explainMove, withAccuracy,
-  ELO_MIN_MOVES, ELO_MIN_GAMES, ELO_LAST_GAMES, ELO_GAME_ERR, ELO_AVG_ERR } from './core.js?v=3';
+  ELO_MIN_MOVES, ELO_MIN_GAMES, ELO_LAST_GAMES, ELO_GAME_ERR, ELO_AVG_ERR, PV_LEN } from './core.js?v=4';
 import { playerGames } from './sources.js';
 import { enabled as sharing, appCheck, openGroup, newCode, cleanCode } from './partage.js?v=2';
 import { weekStart, gazette, records, challenges } from './gazette.js';
@@ -26,7 +26,7 @@ const S = {
   period: '30', gfilter: 'all', game: null, ply: 0, flip: false,
   depth: MOBILE ? 12 : 15, job: null, flash: null, editPlayer: null, confirm: null, engineErr: null,
   rapidOnly: true, sync: null, limit: 40, group: null, between: false, duel: null,
-  me: null, queue: null, week: 0,
+  me: null, queue: null, week: 0, line: null,
 };
 
 /* ---------- Stockage ---------- */
@@ -948,6 +948,63 @@ function graphSVG(a, ply) {
 }
 function evalStr(e) { return e && e !== '?' ? e : ''; }
 
+/* --- Suite optimale (bouton « Afficher ») --- */
+// Rejoue sur l'échiquier la ligne du moteur depuis la position où le coup a été choisi : le
+// meilleur coup puis la suite. Les bilans récents la gardent (pos[].p) ; pour les anciens, le
+// moteur la calcule à la demande (une position, environ une seconde).
+function lineMoves(fen, uci) {
+  const c = new Chess(fen); const out = [];
+  for (const u of uci) {
+    let m = null; try { m = c.move({ from: u.slice(0, 2), to: u.slice(2, 4), promotion: u[4] }); } catch (_) { m = null; }
+    if (!m) break;
+    out.push({ san: m.san, lan: m.lan, from: m.from, to: m.to, color: m.color, fen: c.fen() });
+  }
+  return out;
+}
+async function showLine() {
+  const g = S.game; const a = g && g.analysis; if (!a) return;
+  const p = parsed(g); const k = Math.max(1, Math.min(S.ply, p.hist.length)); const fen = p.fens[k - 1];
+  const stored = a.pos[k - 1] && a.pos[k - 1].p;
+  const L = { gid: g.id, k, fen, moves: stored ? lineMoves(fen, stored.split(' ')) : [], i: 1, loading: !stored, err: null };
+  S.line = L; render();
+  if (stored) return;
+  try {
+    await engine.init();
+    // La ligne part du coup conseillé dans le bilan (« Il fallait jouer… ») : le moteur ne calcule
+    // que la suite, sinon il pourrait proposer un autre premier coup que celui affiché.
+    const first = a.pos[k - 1] && a.pos[k - 1].b;
+    const head = first ? lineMoves(fen, [first]) : [];
+    const from = head.length ? head[0].fen : fen;
+    const res = await engine.evaluate(from, Math.min(Math.max(a.depth || 12, 12), 15));
+    const rest = ((res.lines[0] && res.lines[0].pv) || []).slice(0, PV_LEN - head.length);
+    L.moves = lineMoves(fen, [...head.map((x) => x.lan), ...rest]);
+  } catch (e) { L.err = e.message || String(e); }
+  L.loading = false;
+  if (S.line === L) render();
+}
+const lineOn = (g, k) => S.line && g && S.line.gid === g.id && S.line.k === k ? S.line : null;
+function lineLabel(fen, mv, first) {
+  const no = +fen.split(' ')[5] || 1;
+  return mv.color === 'w' ? no + '. ' + mv.san : (first ? no + '… ' : '') + mv.san;
+}
+function linePanel(g, L, prevPos) {
+  if (L.loading) return `<div class="cm-body"><div class="cm-title">Suite optimale</div><p class="cm-txt muted">Le moteur calcule la ligne…</p></div>`;
+  if (L.err || !L.moves.length) return `<div class="cm-body"><div class="cm-title">Suite optimale</div><p class="cm-txt muted">Pas de ligne disponible${L.err ? ' : ' + esc(L.err) : ''}.</p>
+    <div class="row"><button class="btn ghost" data-act="lclose">Fermer</button></div></div>`;
+  // Numéros de coups lus dans la position de chaque coup (le FEN d'avant).
+  let fen = L.fen; const cells = L.moves.map((mv, j) => { const lab = lineLabel(fen, mv, j === 0); fen = mv.fen;
+    return `<button class="mv" data-act="lgo" data-v="${j + 1}" aria-current="${L.i === j + 1}">${esc(lab)}</button>`; }).join('');
+  const ev = prevPos && evalStr(prevPos.e) ? ` · éval. ${esc(prevPos.e)}` : '';
+  return `<div class="cm-body" style="flex:1">
+    <div class="cm-title">Suite optimale</div>
+    <div class="cm-sub mono">Au lieu de ${esc(moveLabel(g, L.k - 1))}${ev}</div>
+    <div class="pvline">${cells}</div>
+    <div class="row" style="margin-top:8px"><button class="btn" data-act="lgo" data-v="0" aria-label="Revenir à la position">«</button>
+      <button class="btn" data-act="lstep" data-v="-1" aria-label="Coup précédent de la ligne">‹</button>
+      <button class="btn" data-act="lstep" data-v="1" aria-label="Coup suivant de la ligne">›</button>
+      <button class="btn ghost" data-act="lclose">Fermer</button></div></div>`;
+}
+
 function viewAnalysis() {
   const g = S.game;
   if (!g) return `<div class="panel empty"><h2>Choisis une partie</h2><p>Ouvre une partie depuis l’onglet Parties, ou essaie le bilan sur une partie célèbre.</p>
@@ -972,7 +1029,19 @@ function viewAnalysis() {
     comment = `<span class="b b-${cls}">${c.sym}</span><div class="cm-body">
       <div class="cm-title">${esc(moveLabel(g, k - 1))}, <span class="t-${cls}">${c.label.toLowerCase()}</span></div>
       ${sub ? `<div class="cm-sub mono">${sub}</div>` : ''}
-      <p class="cm-txt">${esc(explainMove(p.hist, a, k - 1, BOOKD))}</p></div>`;
+      <p class="cm-txt">${esc(explainMove(p.hist, a, k - 1, BOOKD))}</p>
+      ${prevPos && prevPos.b ? `<div class="row" style="margin-top:8px"><button class="btn" data-act="line" title="Rejouer la meilleure suite du moteur depuis la position d’avant ce coup">Afficher la suite optimale</button></div>` : ''}</div>`;
+  }
+  // Suite optimale affichée : l'échiquier suit la ligne, le commentaire devient la liste de ses coups.
+  const L = a && last ? lineOn(g, k) : null;
+  let boardFen = p.fens[k], boardLast = last, boardCls = cls, boardArrow = arrow;
+  if (L) {
+    comment = linePanel(g, L, prevPos);
+    if (L.moves.length) {
+      const mv = L.i > 0 ? L.moves[L.i - 1] : null;
+      boardFen = mv ? mv.fen : L.fen; boardLast = mv; boardCls = mv ? 'best' : null;
+      boardArrow = L.moves[L.i] ? L.moves[L.i].lan : null;
+    }
   }
 
   // Colonne de droite
@@ -1037,7 +1106,7 @@ function viewAnalysis() {
         <div class="boardrow">
           <div class="evalbar ${S.flip ? 'flip' : ''}" aria-label="Barre d’évaluation"><div class="fill" style="height:${wPct}%"></div>
             ${curPos && evalStr(curPos.e) ? `<span class="lab" style="${(wPct >= 50) !== S.flip ? 'bottom:0;color:var(--bfill)' : 'top:0;color:var(--wfill)'}">${esc(curPos.e)}</span>` : ''}</div>
-          <div class="frame"><div class="board" id="board">${boardHTML(p.fens[k], last, cls, arrow, S.flip)}</div></div>
+          <div class="frame"><div class="board" id="board">${boardHTML(boardFen, boardLast, boardCls, boardArrow, S.flip)}</div></div>
         </div>
         ${pl(botSide)}
         <div class="controls">
@@ -1059,7 +1128,7 @@ function depthPicker() {
 }
 
 /* ---------- Actions ---------- */
-function openGame(g, ply) { S.game = g; S.ply = ply; S.view = 'analyse'; S.engineErr = null; S.flash = null; render(); scrollTo({ top: 0 }); }
+function openGame(g, ply) { S.game = g; S.ply = ply; S.line = null; S.view = 'analyse'; S.engineErr = null; S.flash = null; render(); scrollTo({ top: 0 }); }
 function openSample() {
   const { meta } = parsePgn(OPERA_PGN);
   const g = { id: 'sample-opera', sample: true, pgn: OPERA_PGN, ...meta };
@@ -1119,7 +1188,11 @@ document.addEventListener('click', async (ev) => {
   else if (act === 'copylink') copyLink();
   else if (act === 'editp') { S.editPlayer = S.players.find((p) => p.id === t.dataset.id) || null; render(); }
   else if (act === 'canceledit') { S.editPlayer = null; render(); }
-  else if (act === 'ply') { S.ply = +v; render(); }
+  else if (act === 'ply') { S.ply = +v; S.line = null; render(); }
+  else if (act === 'line') showLine();
+  else if (act === 'lclose') { S.line = null; render(); }
+  else if (act === 'lgo') { if (S.line) { S.line.i = Math.max(0, Math.min(S.line.moves.length, +v)); render(); } }
+  else if (act === 'lstep') lineStep(+v);
   else if (act === 'step') step(+v);
   else if (act === 'flip') { S.flip = !S.flip; render(); }
   else if (act === 'depth') { S.depth = +v; render(); }
@@ -1154,7 +1227,13 @@ document.addEventListener('click', (ev) => {
   const r = gEl.getBoundingClientRect(); const n = S.game.analysis.pos.length - 1;
   S.ply = Math.max(0, Math.min(n, Math.round(((ev.clientX - r.left) / r.width) * n))); render();
 });
-function step(d) { if (!S.game) return; const n = parsed(S.game).hist.length; S.ply = Math.max(0, Math.min(n, S.ply + d)); render(); }
+function lineStep(d) { const L = S.line; if (!L) return; L.i = Math.max(0, Math.min(L.moves.length, L.i + d)); render(); }
+// Tant que la suite optimale est affichée, flèches et glissés avancent dans la ligne.
+function step(d) {
+  if (!S.game) return;
+  if (lineOn(S.game, S.ply) && S.line.moves.length) { lineStep(d); return; }
+  const n = parsed(S.game).hist.length; S.ply = Math.max(0, Math.min(n, S.ply + d)); S.line = null; render();
+}
 document.addEventListener('keydown', (ev) => {
   if (S.view !== 'analyse' || /INPUT|TEXTAREA|SELECT/.test(document.activeElement && document.activeElement.tagName)) return;
   if (ev.key === 'ArrowLeft') { step(-1); ev.preventDefault(); }
